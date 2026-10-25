@@ -1,0 +1,213 @@
+:root {
+    --primary-color: #3b82f6;
+    --text-color: #333333;
+    --background-color: #f9fafb;
+    --card-bg: #ffffff;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+body {
+    background-color: var(--background-color);
+    color: var(--text-color);
+    line-height: 1.6;
+}
+
+/* Header */
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 2rem;
+    background-color: var(--card-bg);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.logo {
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: var(--primary-color);
+}
+
+.nav a {
+    text-decoration: none;
+    color: var(--text-color);
+    margin: 0 1rem;
+    font-weight: 500;
+}
+
+.cart-icon {
+    font-size: 1.2rem;
+    cursor: pointer;
+}
+
+/* Container */
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+.hero-banner {
+    background-color: #e5e7eb;
+    padding: 4rem 2rem;
+    text-align: center;
+    border-radius: 8px;
+    margin-bottom: 3rem;
+}
+
+.hero-text {
+    font-size: 3rem;
+    color: #ffffff; /* BUG: White text on light gray background (Contrast) */
+}
+
+.hero-subtext {
+    font-size: 1.2rem;
+    color: #f8fafc; /* BUG: Extremely poor contrast */
+}
+
+.invisible-link {
+    color: #e5e7eb; /* BUG: Same color as hero-banner background */
+    text-decoration: none;
+    font-size: 0.8rem;
+}
+
+.section-title {
+    margin-bottom: 2rem;
+    font-size: 2rem;
+}
+
+/* Product Grid */
+.product-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 2rem;
+    margin-bottom: 5rem;
+}
+
+.product-card {
+    background-color: var(--card-bg);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+    transition: transform 0.2s;
+}
+
+.product-card:hover {
+    transform: translateY(-5px);
+}
+
+.image-container img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.product-info {
+    padding: 1.5rem;
+    position: relative;
+}
+
+.product-name {
+    font-size: 1.25rem;
+    margin-bottom: 0.5rem;
+}
+
+.price-container {
+    position: absolute;
+    top: -20px;
+    background: white;
+    padding: 5px;
+    border-radius: 4px;
+}
+
+.price-container-normal {
+    margin-bottom: 1rem;
+}
+
+.price {
+    font-weight: bold;
+    font-size: 1.5rem;
+    color: var(--primary-color);
+}
+
+.discount-tag {
+    background-color: #ef4444;
+    color: white;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    margin-left: 0.5rem;
+}
+
+.add-to-cart {
+    display: block;
+    width: 100%;
+    padding: 0.75rem;
+    background-color: var(--primary-color);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 1rem;
+    cursor: pointer;
+    margin-top: 1rem;
+}
+
+.add-to-cart:hover {
+    background-color: #2563eb;
+}
+
+/* Footer */
+.footer {
+    text-align: center;
+    padding: 2rem;
+    background-color: var(--card-bg);
+    margin-top: auto;
+}
+
+.floating-checkout-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    background-color: #1f2937;
+    color: white;
+    padding: 1rem;
+}
+
+.checkout-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.checkout-button {
+    width: 500px; /* BUG: Hardcoded width causes horizontal scroll on mobile (Responsive) */
+    padding: 1rem;
+    background-color: #10b981;
+    color: white;
+    border: none;
+    font-weight: bold;
+    font-size: 1.2rem;
+    cursor: pointer;
+}
+
+/* BUG: Missing media query for mobile causing header links to overlap */
+@media (max-width: 600px) {
+    .header {
+        flex-direction: row; /* Should be column for mobile */
+        padding: 0.5rem;
+    }
+    
+    .nav a {
+        margin: 0 0.1rem; /* Too tight for touch targets */
+        font-size: 14px;
+    }
+}

@@ -1,0 +1,69 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mock Storefront</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header class="header">
+        <div class="logo">Storefront</div>
+        <nav class="nav">
+            <a href="#">Home</a>
+            <a href="#">Products</a>
+            <a href="#">About</a>
+        </nav>
+        <div class="cart-icon">🛒 <span class="cart-count">0</span></div>
+    </header>
+
+    <div class="container">
+        <div class="hero-banner">
+            <h1 class="hero-text">Welcome to our store</h1>
+            <p class="hero-subtext">Discover amazing products today.</p>
+        </div>
+
+        <h2 class="section-title">Featured Products</h2>
+        
+        <div class="product-grid">
+            <!-- Product 1 -->
+            <div class="product-card">
+                <div class="image-container">
+                    <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='200'%3E%3Crect width='300' height='200' fill='%23cccccc'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' fill='%23333333'%3E300x200%3C/text%3E%3C/svg%3E" alt="Product 1">
+                </div>
+                <div class="product-info">
+                    <div class="price-container">
+                        <span class="price">$29.99</span>
+                        <span class="discount-tag">Sale</span>
+                    </div>
+                    <h3 class="product-name">Wireless Headphones</h3>
+                    <button class="add-to-cart">Add to Cart</button>
+                </div>
+            </div>
+            
+            <!-- Product 2 -->
+            <div class="product-card">
+                <div class="image-container">
+                    <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='200'%3E%3Crect width='300' height='200' fill='%23cccccc'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' fill='%23333333'%3E300x200%3C/text%3E%3C/svg%3E" alt="Product 2">
+                </div>
+                <div class="product-info">
+                    <div class="price-container price-container-normal">
+                        <span class="price">$49.99</span>
+                    </div>
+                    <h3 class="product-name">Smart Watch</h3>
+                    <button class="add-to-cart">Add to Cart</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="floating-checkout-bar">
+        <div class="checkout-content">
+            <span class="total-label">Total: $<span id="cart-total">0.00</span></span>
+            <button class="checkout-button">Proceed to Checkout</button>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>

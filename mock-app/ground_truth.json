@@ -1,0 +1,16 @@
+{
+  "bugs": [
+    {
+      "type": "checkout button overflow on mobile",
+      "description": "The checkout button is fixed at 400px width causing it to overflow on mobile screens."
+    },
+    {
+      "type": "hero text contrast",
+      "description": "The hero text lacks contrast against its background."
+    },
+    {
+      "type": "price overlap",
+      "description": "The price overlaps the image due to top: -20px absolute positioning."
+    }
+  ]
+}

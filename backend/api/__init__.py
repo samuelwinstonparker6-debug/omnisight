@@ -1,0 +1,1 @@
+"""OmniSight API routes package."""

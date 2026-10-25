@@ -1,0 +1,1 @@
+"""OmniSight core configuration package."""

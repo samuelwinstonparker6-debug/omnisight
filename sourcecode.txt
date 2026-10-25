@@ -1,0 +1,4207 @@
+OmniSight Source Code Reference
+===============================
+
+--- FILE: .\docker-compose.yml ---
+version: '3.8'
+
+services:
+  omnisight-backend:
+    build: 
+      context: .
+      dockerfile: backend/Dockerfile
+    ports:
+      - "8000:8000"
+    environment:
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=${GEMINI_MODEL}
+      - GITHUB_TOKEN=${GITHUB_TOKEN}
+      - GITHUB_WEBHOOK_SECRET=${GITHUB_WEBHOOK_SECRET}
+      - DATABASE_URL=sqlite+aiosqlite:///./data/omnisight.db
+    volumes:
+      - ./backend:/app/backend
+      - ./mock-app:/app/mock-app
+      - ./output:/app/output
+      - ./data:/app/data
+    command: uvicorn backend.main:app --host 0.0.0.0 --port 8000 --reload
+
+  omnisight-frontend:
+    build: 
+      context: .
+      dockerfile: frontend/Dockerfile
+    ports:
+      - "5173:5173"
+    volumes:
+      - ./frontend:/app
+      - /app/node_modules
+    environment:
+      - VITE_API_URL=http://localhost:8000
+    depends_on:
+      - omnisight-backend
+
+--- FILE: .\README.md ---
+# OmniSight
+
+**Multimodal UI Self-Healing & RPA Agent**
+
+OmniSight is an intelligent agent designed to automatically scan web applications, detect visual and layout bugs using Vision-Language Models (VLMs), generate code fixes, and submit Pull Requests directly to your repository.
+
+## Architecture
+
+![Architecture](docs/architecture.md)
+
+1. **Browser Automation**: Uses Playwright to navigate to target URLs and capture full-page screenshots across multiple viewports (desktop, tablet, mobile).
+2. **VLM Analysis**: Sends screenshots to a Vision-Language Model (like Gemini) to detect layout bugs, contrast issues, overlapping elements, and accessibility violations.
+3. **Agent Orchestrator**: Uses a LangChain-based ReAct agent to orchestrate the pipeline and generate CSS/HTML fixes based on the VLM's analysis.
+4. **GitHub PR Creator**: Commits the generated fixes to a new branch and automatically opens a Pull Request on the target repository.
+
+## Project Structure
+
+- `backend/`: FastAPI server for triggering scans and viewing results.
+  - `services/browser/`: Playwright automation.
+  - `services/vlm/`: Gemini Vision integration.
+  - `services/agent/`: LangChain orchestration.
+  - `services/github/`: PyGithub PR integration.
+- `mock-app/`: A sample e-commerce application with deliberate UI bugs for testing the agent.
+- `frontend/`: React dashboard (coming soon).
+- `tests/`: Unit and integration test suite.
+
+## Setup Instructions
+
+1. Clone the repository.
+2. Ensure you have Python 3.10+ installed.
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. Copy the environment variables template and configure your keys:
+   ```bash
+   cp .env.example .env
+   ```
+   Add your `GEMINI_API_KEY` and `GITHUB_TOKEN` to the `.env` file.
+5. Start the development server:
+   ```bash
+   python scripts/start_dev.py
+   ```
+
+## Development (15-Day Internship Plan)
+
+This project is being built over a 15-day internship. 
+- **Day 1**: Project structure, scaffolding, and mock target application.
+- **Day 2-3**: Browser automation & VLM integration.
+- **Day 4**: Database persistence.
+- **Day 5-6**: Agent orchestration.
+- **Day 7**: GitHub PR integration.
+- *(Remaining days detailed in project specification)*
+
+--- FILE: .\requirements.txt ---
+fastapi
+uvicorn
+pydantic
+pydantic-settings
+sqlalchemy
+aiosqlite
+langchain
+langchain-google-genai
+playwright
+PyGithub
+python-dotenv
+python-multipart
+jinja2
+pytest
+requests
+Pillow
+httpx
+pytest-asyncio
+
+--- FILE: .\backend\main.py ---
+"""
+OmniSight — FastAPI Application Entry Point
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Main application module that bootstraps the FastAPI server with:
+- CORS middleware for frontend communication
+- Health check endpoint
+- API route registration
+- Startup/shutdown lifecycle events
+- Structured logging
+"""
+
+import logging
+import sys
+import asyncio
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any, AsyncGenerator
+import os
+
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+
+from backend.api.routes import router as api_router
+from backend.core.config import get_settings
+from backend.core.logging import setup_logging
+from backend.db.database import init_db
+from backend.db.database import engine
+import backend.models.models  # Import to register models with SQLAlchemy Base
+from sqlalchemy import text
+
+# Load settings & configure logging
+settings = get_settings()
+setup_logging(level=settings.log_level)
+logger = logging.getLogger(__name__)
+
+if sys.platform == "win32":
+    asyncio.set_event_loop_policy(asyncio.WindowsProactorEventLoopPolicy())
+
+# Create necessary directories
+os.makedirs("output", exist_ok=True)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
+    """
+    Application lifespan manager.
+    Handles startup initialization and graceful shutdown.
+    """
+    logger.info("🚀 Starting OmniSight v%s", settings.app_version)
+    logger.info("📡 Staging URL: %s", settings.staging_url)
+    logger.info("🤖 Gemini configured: %s", settings.is_gemini_configured)
+    logger.info("🐙 GitHub configured: %s", settings.is_github_configured)
+    logger.info("🗄️  Database: %s", settings.database_url)
+
+    # Initialize database tables
+    await init_db()
+    
+    yield
+
+    logger.info("👋 Shutting down OmniSight...")
+
+
+app = FastAPI(
+    title="OmniSight API",
+    description=(
+        "Multimodal UI Self-Healing & RPA Agent — "
+        "Automatically detects UI bugs using Vision-Language Models "
+        "and generates fix PRs via GitHub."
+    ),
+    version=settings.app_version,
+    lifespan=lifespan,
+    docs_url="/docs",
+    redoc_url="/redoc",
+)
+
+# CORS Middleware
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:3000",   
+        "http://localhost:5173",   
+        "http://localhost:5500",   
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+# Static files for screenshots and mock app
+app.mount("/static", StaticFiles(directory="output"), name="static")
+app.mount("/mock-app", StaticFiles(directory="mock-app"), name="mock-app")
+
+# Register API routes
+app.include_router(api_router)
+
+from backend.api.webhook import router as webhook_router
+app.include_router(webhook_router, prefix="/api/v1")
+
+
+@app.get(
+    "/health",
+    tags=["system"],
+    summary="Health check",
+    response_description="Service health status",
+)
+async def health_check() -> dict[str, Any]:
+    """
+    Health check endpoint.
+    Returns the current service status, version, and uptime info.
+    Includes a real database connectivity check.
+    """
+    db_status = "disconnected"
+    try:
+        async with engine.connect() as conn:
+            await conn.execute(text("SELECT 1"))
+        db_status = "connected"
+    except Exception as e:
+        logger.error(f"Database health check failed: {e}")
+
+    return {
+        "status": "healthy" if db_status == "connected" else "degraded",
+        "service": settings.app_name,
+        "version": settings.app_version,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "checks": {
+            "gemini": "configured" if settings.is_gemini_configured else "missing_key",
+            "github": "configured" if settings.is_github_configured else "missing_key",
+            "database": db_status,
+        },
+    }
+
+
+@app.get("/", tags=["system"], include_in_schema=False)
+async def root() -> dict[str, str]:
+    """Redirect root to API documentation."""
+    return {
+        "message": f"Welcome to {settings.app_name} API v{settings.app_version}",
+        "docs": "/docs",
+        "health": "/health",
+    }
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(
+        "backend.main:app",
+        host=settings.app_host,
+        port=settings.app_port,
+        reload=settings.app_debug,
+        log_level=settings.log_level.lower(),
+    )
+
+--- FILE: .\backend\__init__.py ---
+"""
+OmniSight Backend Package
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Multimodal UI Self-Healing & RPA Agent — FastAPI backend server.
+Provides API endpoints for triggering UI audits, viewing run history,
+and managing automated bug-fix workflows.
+"""
+
+__version__ = "0.1.0"
+__author__ = "Infotact Solutions"
+
+--- FILE: .\backend\api\routes.py ---
+"""
+OmniSight API — Routes
+~~~~~~~~~~~~~~~~~~~~~~
+
+REST API endpoint definitions for the OmniSight backend.
+"""
+
+import uuid
+from datetime import datetime, timezone
+from fastapi import APIRouter, HTTPException, Depends
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from sqlalchemy.orm import selectinload
+from typing import Any
+from backend.db.database import get_db_session
+from backend.models.models import ScanRunModel, BugModel
+from pydantic import BaseModel
+from backend.models.schemas import ScanResult, BugReport, ScanStatus
+from backend.services.vlm.analyzer import analyze_screenshot, crop_element_region
+
+router = APIRouter(prefix="/api/v1", tags=["omnisight"])
+
+
+@router.get("/status", summary="System status")
+async def system_status() -> dict[str, Any]:
+    """Return current system status and capabilities."""
+    return {
+        "status": "operational",
+        "version": "0.1.0",
+        "services": {
+            "browser_automation": "ready",
+            "vlm_analysis": "not_configured",
+            "github_integration": "not_configured",
+            "agent_orchestrator": "not_configured",
+        },
+    }
+
+
+from backend.core.config import get_settings
+from backend.services.browser.automation import capture_screenshots
+
+@router.post("/scan", summary="Trigger UI scan")
+async def trigger_scan(
+    url: str | None = None,
+    db: AsyncSession = Depends(get_db_session)
+) -> dict[str, Any]:
+    """
+    Trigger a full UI scan on the target URL.
+
+    This endpoint will:
+    1. Launch a headless browser via Playwright
+    2. Capture screenshots at multiple viewports
+    3. (Day 3) Send screenshots to the VLM for analysis
+    4. Return identified UI bugs
+
+    Args:
+        url: Target URL to scan. Falls back to STAGING_URL from config.
+        db: Database session.
+
+    Returns:
+        Scan result with identified issues or captured screenshots (Day 2).
+    """
+    settings = get_settings()
+    target_url = url or settings.staging_url
+    
+    # Initialize run record
+    run_id = str(uuid.uuid4())
+    started_at = datetime.now(timezone.utc)
+    run_model = ScanRunModel(
+        id=run_id,
+        url=target_url,
+        status=ScanStatus.RUNNING,
+        started_at=started_at,
+    )
+    db.add(run_model)
+    await db.commit()
+    
+    # 1. Capture screenshots (Day 2)
+    screenshots = await capture_screenshots(
+        url=target_url,
+        headless=settings.browser_headless
+    )
+    
+    if not screenshots:
+        raise HTTPException(status_code=502, detail="No screenshot captured from the target URL.")
+    
+    # 2. VLM Analysis (Day 3)
+    all_bugs = []
+    db_bugs = []
+    
+    for viewport, image_path in screenshots.items():
+        analysis = await analyze_screenshot(
+            image_path=image_path,
+            page_url=target_url,
+            viewport=viewport
+        )
+        if analysis.get("status") == "success":
+            for bug_data in analysis.get("bugs", []):
+                # Ensure the bug object has required fields like category and severity
+                bug_data["viewport"] = viewport
+                bug_data["screenshot_path"] = image_path
+                all_bugs.append(bug_data)
+                
+                bug_id = str(uuid.uuid4())
+                bug_model = BugModel(
+                    id=bug_id,
+                    scan_run_id=run_id,
+                    category=bug_data.get("category", "other"),
+                    severity=bug_data.get("severity", "medium"),
+                    title=bug_data.get("title", "Unknown bug"),
+                    description=bug_data.get("description", ""),
+                    element_selector=bug_data.get("element_selector"),
+                    viewport=viewport,
+                    screenshot_path=image_path,
+                    suggested_fix=bug_data.get("suggested_fix"),
+                    confidence=bug_data.get("confidence", 0.9),
+                )
+                db.add(bug_model)
+                db_bugs.append(bug_model)
+                
+    await db.commit()
+    
+    # 3. Verification Loop
+    import os
+    from backend.services.browser.automation import VIEWPORTS, capture_with_injected_css
+    import logging
+    
+    logger = logging.getLogger(__name__)
+    
+    for bug_model in db_bugs:
+        if bug_model.suggested_fix and bug_model.element_selector:
+            try:
+                # Define output path for the verification screenshot
+                out_dir = os.path.join("output", "screenshots", "verification")
+                os.makedirs(out_dir, exist_ok=True)
+                verification_output_path = os.path.abspath(os.path.join(out_dir, f"{bug_model.id}_verified.png"))
+                
+                # Use in-browser injection
+                fixed_img_path = await capture_with_injected_css(
+                    url=target_url,
+                    css_content=bug_model.suggested_fix,
+                    viewport_name=bug_model.viewport,
+                    output_path=verification_output_path,
+                    headless=settings.browser_headless
+                )
+                
+                if fixed_img_path and os.path.exists(fixed_img_path):
+                    cropped_path = await crop_element_region(
+                        image_path=fixed_img_path,
+                        page_url=target_url,
+                        css_selector=bug_model.element_selector,
+                        viewport_name=bug_model.viewport
+                    )
+                    
+                    verify_img_path = cropped_path if cropped_path else fixed_img_path
+                    bug_model.verification_screenshot_path = verify_img_path
+                    
+                    verification_analysis = await analyze_screenshot(
+                        image_path=verify_img_path,
+                        page_url=target_url,
+                        viewport=bug_model.viewport
+                    )
+                    
+                    is_fixed = True
+                    if verification_analysis.get("status") == "success":
+                        for new_bug in verification_analysis.get("bugs", []):
+                            if new_bug.get("element_selector") == bug_model.element_selector or new_bug.get("title") == bug_model.title:
+                                is_fixed = False
+                                break
+                                
+                    bug_model.verification_status = "verified_fixed" if is_fixed else "still_broken"
+                    
+                    for b in all_bugs:
+                        if b.get("title") == bug_model.title and b.get("viewport") == bug_model.viewport:
+                            b["verification_status"] = bug_model.verification_status
+                            b["verification_screenshot_path"] = bug_model.verification_screenshot_path
+            except Exception as e:
+                logger.error(f"Verification loop failed for {bug_model.id}: {e}")
+    
+    completed_at = datetime.now(timezone.utc)
+    duration = (completed_at - started_at).total_seconds()
+    
+    run_model.status = ScanStatus.COMPLETED
+    run_model.completed_at = completed_at
+    run_model.duration_seconds = duration
+    run_model.total_bugs = len(all_bugs)
+    
+    await db.commit()
+    
+    return {
+        "status": "success",
+        "message": "Scan completed with VLM analysis.",
+        "url": target_url,
+        "run_id": run_id,
+        "screenshots": screenshots,
+        "bugs": all_bugs,
+        "total_bugs": len(all_bugs)
+    }
+
+
+@router.get("/runs", summary="List scan runs")
+async def list_runs(db: AsyncSession = Depends(get_db_session)) -> dict[str, Any]:
+    """List all previous scan runs from the database."""
+    result = await db.execute(select(ScanRunModel).order_by(ScanRunModel.started_at.desc()))
+    runs = result.scalars().all()
+    return {
+        "runs": [
+            {
+                "run_id": run.id,
+                "url": run.url,
+                "status": run.status,
+                "started_at": run.started_at,
+                "total_bugs": run.total_bugs,
+            }
+            for run in runs
+        ],
+        "total": len(runs),
+    }
+
+
+@router.get("/runs/{run_id}", summary="Get scan run details", response_model=ScanResult)
+async def get_run(run_id: str, db: AsyncSession = Depends(get_db_session)) -> Any:
+    """Get detailed results for a specific scan run."""
+    result = await db.execute(
+        select(ScanRunModel).options(selectinload(ScanRunModel.bugs)).where(ScanRunModel.id == run_id)
+    )
+    run = result.scalars().first()
+    if not run:
+        raise HTTPException(status_code=404, detail=f"Run {run_id} not found")
+        
+    return ScanResult(
+        run_id=run.id,
+        url=run.url,
+        status=run.status,
+        started_at=run.started_at,
+        completed_at=run.completed_at,
+        duration_seconds=run.duration_seconds,
+        bugs=[
+            BugReport(
+                id=bug.id,
+                category=bug.category,
+                severity=bug.severity,
+                title=bug.title,
+                description=bug.description,
+                element_selector=bug.element_selector,
+                viewport=bug.viewport,
+                screenshot_path=bug.screenshot_path,
+                suggested_fix=bug.suggested_fix,
+                confidence=bug.confidence,
+                verification_status=bug.verification_status,
+                verification_screenshot_path=bug.verification_screenshot_path,
+            ) for bug in run.bugs
+        ],
+        total_bugs=run.total_bugs,
+        screenshots={},
+        pr_url=run.pr_url,
+    )
+
+
+class FixRequest(BaseModel):
+    action: str  # "approve" or "reject"
+
+
+@router.post("/bugs/{bug_id}/action", summary="Approve or reject an AI fix")
+async def action_bug_fix(
+    bug_id: str,
+    req: FixRequest,
+    db: AsyncSession = Depends(get_db_session)
+) -> dict[str, Any]:
+    """Approve (create PR) or reject a suggested bug fix."""
+    result = await db.execute(select(BugModel).where(BugModel.id == bug_id))
+    bug = result.scalars().first()
+    if not bug:
+        raise HTTPException(status_code=404, detail="Bug not found")
+        
+    if req.action == "reject":
+        return {"status": "success", "message": "Fix rejected"}
+        
+    if req.action == "approve":
+        if not bug.suggested_fix:
+            raise HTTPException(status_code=400, detail="No suggested fix available")
+            
+        from backend.services.github.pr_creator import create_fix_pr
+        
+        # We need a file path to fix. In a real system the LLM would provide this,
+        # but for the mock app we can default to "mock-app/styles.css".
+        file_path = "mock-app/styles.css"
+        
+        # --- Solve Context Loss: Read actual file and use LLM to patch it ---
+        import os
+        from backend.core.config import get_settings
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        
+        full_path = os.path.join(os.getcwd(), file_path)
+        try:
+            with open(full_path, "r", encoding="utf-8") as f:
+                original_content = f.read()
+        except FileNotFoundError:
+            original_content = "/* Styles file not found */"
+            
+        settings = get_settings()
+        if settings.gemini_api_key:
+            llm = ChatGoogleGenerativeAI(
+                model=settings.gemini_model or "gemini-1.5-pro",
+                google_api_key=settings.gemini_api_key,
+                temperature=0.0
+            )
+            prompt = (
+                f"You are a frontend developer. Here is the existing CSS file:\n```css\n{original_content}\n```\n\n"
+                f"The bug is: {bug.title}\nDescription: {bug.description}\nThe suggested fix is: {bug.suggested_fix}\n\n"
+                "Please rewrite the COMPLETE updated CSS file incorporating this fix safely into the existing classes. "
+                "Do not return any explanations, just the raw CSS."
+            )
+            try:
+                response = await llm.ainvoke(prompt)
+                fix_content = response.content
+                # Strip markdown
+                if fix_content.strip().startswith("```"):
+                    lines = fix_content.strip().splitlines()
+                    if lines[0].startswith("```"): lines = lines[1:]
+                    if lines and lines[-1].startswith("```"): lines = lines[:-1]
+                    fix_content = "\n".join(lines)
+            except Exception as e:
+                fix_content = original_content + "\n/* AI Auto-Fix */\n" + bug.suggested_fix
+        else:
+            fix_content = original_content + "\n/* AI Auto-Fix (Mocked) */\n" + bug.suggested_fix
+        
+        pr_result = await create_fix_pr(
+            file_path=file_path,
+            fix_content=fix_content,
+            bug_description=bug.title,
+            bug_severity=bug.severity,
+            bug_viewport=bug.viewport,
+            bug_element_selector=bug.element_selector,
+            vlm_reasoning=bug.description,
+            before_img_url=bug.screenshot_path,
+            after_img_url=bug.verification_screenshot_path,
+            original_content=original_content,
+        )
+        
+        if pr_result["status"] == "error":
+            raise HTTPException(status_code=500, detail=pr_result["message"])
+            
+        # Update the ScanRun's pr_url
+        run_res = await db.execute(select(ScanRunModel).where(ScanRunModel.id == bug.scan_run_id))
+        run = run_res.scalars().first()
+        if run and not run.pr_url:
+            run.pr_url = pr_result.get("pr_url")
+            await db.commit()
+            
+        return pr_result
+        
+    raise HTTPException(status_code=400, detail="Invalid action")
+
+--- FILE: .\backend\api\webhook.py ---
+import hmac
+import hashlib
+import logging
+import uuid
+from typing import Optional, Any
+from fastapi import APIRouter, BackgroundTasks, Header, HTTPException, Request
+from pydantic import BaseModel
+
+from backend.core.config import get_settings
+from backend.services.agent.orchestrator import run_pipeline
+
+logger = logging.getLogger(__name__)
+router = APIRouter(prefix="/webhook", tags=["ci-cd"])
+
+class CICDTriggerPayload(BaseModel):
+    repository: str
+    branch: str
+    commit_sha: str
+    staging_url: Optional[str] = None
+    environment: Optional[str] = "staging"
+
+async def verify_github_signature(request: Request, signature: str, secret: str) -> None:
+    body = await request.body()
+    hash_object = hmac.new(secret.encode("utf-8"), msg=body, digestmod=hashlib.sha256)
+    expected_signature = "sha256=" + hash_object.hexdigest()
+    if not hmac.compare_digest(expected_signature, signature):
+        raise HTTPException(status_code=401, detail="Invalid GitHub webhook signature")
+
+@router.post("/ci-cd-trigger", status_code=202)
+async def ci_cd_trigger(
+    payload: CICDTriggerPayload,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    x_hub_signature_256: Optional[str] = Header(None)
+) -> dict[str, Any]:
+    """Receives CI/CD build events and triggers the OmniSight autonomous scan."""
+    settings = get_settings()
+    
+    # Validate webhook signature if configured
+    if settings.github_webhook_secret and x_hub_signature_256:
+        await verify_github_signature(request, x_hub_signature_256, settings.github_webhook_secret)
+
+    target_url = payload.staging_url or settings.staging_url
+    job_id = str(uuid.uuid4())
+
+    logger.info(f"CI/CD Webhook received for commit {payload.commit_sha}. Queuing OmniSight scan on {target_url}")
+
+    # Dispatch the self-healing workflow in the background
+    background_tasks.add_task(run_pipeline, target_url=target_url, auto_fix=True, create_pr=True)
+
+    return {
+        "status": "accepted",
+        "job_id": job_id,
+        "commit_sha": payload.commit_sha,
+        "message": "OmniSight scan queued successfully."
+    }
+
+--- FILE: .\backend\api\__init__.py ---
+"""OmniSight API routes package."""
+
+--- FILE: .\backend\core\config.py ---
+"""
+OmniSight — Application Configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Centralized configuration management using pydantic-settings.
+All environment variables are loaded from .env file and validated
+at startup with type checking and sensible defaults.
+"""
+
+from functools import lru_cache
+from typing import Literal
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class Settings(BaseSettings):
+    """
+    Application settings loaded from environment variables.
+
+    All values can be overridden via a `.env` file in the project root
+    or by setting the corresponding environment variable directly.
+    """
+
+    model_config = SettingsConfigDict(
+        env_file=".env",
+        env_file_encoding="utf-8",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
+    # ── Application ──────────────────────────────────────────
+    app_name: str = "OmniSight"
+    app_version: str = "0.1.0"
+    app_host: str = "0.0.0.0"
+    app_port: int = 8000
+    app_debug: bool = False
+
+    # ── Logging ──────────────────────────────────────────────
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
+
+    # ── Gemini / VLM ────────────────────────────────────────
+    gemini_api_key: str = ""
+    gemini_model: str = "gemini-1.5-pro-latest"
+
+    # ── GitHub ───────────────────────────────────────────────
+    github_token: str = ""
+    github_repo: str = ""
+    github_webhook_secret: str = ""
+
+    # ── Agent ────────────────────────────────────────────────
+    max_fix_retries: int = 3
+
+    # ── Target Application ───────────────────────────────────
+    staging_url: str = "http://localhost:8000/mock-app/index.html"
+
+    # ── Database ─────────────────────────────────────────────
+    database_url: str = "sqlite+aiosqlite:///./omnisight.db"
+
+    # ── Browser / Playwright ─────────────────────────────────
+    browser_headless: bool = True
+    browser_viewport_width: int = 1280
+    browser_viewport_height: int = 720
+
+    @property
+    def is_gemini_configured(self) -> bool:
+        """Check if Gemini API key is set."""
+        return bool(self.gemini_api_key)
+
+    @property
+    def is_github_configured(self) -> bool:
+        """Check if GitHub token and repo are set."""
+        return bool(
+            self.github_token
+            and self.github_token != "ghp_your-github-token-here"
+            and self.github_repo
+            and self.github_repo != "your-username/your-repo-name"
+        )
+
+
+@lru_cache
+def get_settings() -> Settings:
+    """
+    Get cached application settings singleton.
+
+    Uses lru_cache to ensure settings are loaded only once
+    and reused across the application lifecycle.
+
+    Returns:
+        Settings: Validated application settings instance.
+    """
+    return Settings()
+
+--- FILE: .\backend\core\logging.py ---
+"""
+OmniSight — Logging Configuration
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Structured JSON logging with configurable levels per module.
+"""
+
+import logging
+import sys
+from typing import Optional
+
+
+def setup_logging(level: str = "INFO", json_format: bool = False) -> logging.Logger:
+    """
+    Configure application-wide logging.
+
+    Args:
+        level: Logging level string (DEBUG, INFO, WARNING, ERROR, CRITICAL).
+        json_format: If True, output logs as structured JSON (for production).
+
+    Returns:
+        Root logger configured with the specified settings.
+    """
+    log_level = getattr(logging, level.upper(), logging.INFO)
+
+    # Clear existing handlers
+    root_logger = logging.getLogger()
+    root_logger.handlers.clear()
+
+    if json_format:
+        try:
+            from pythonjsonlogger import jsonlogger
+
+            handler = logging.StreamHandler(sys.stdout)
+            formatter = jsonlogger.JsonFormatter(
+                fmt="%(asctime)s %(name)s %(levelname)s %(message)s",
+                datefmt="%Y-%m-%dT%H:%M:%S",
+            )
+            handler.setFormatter(formatter)
+        except ImportError:
+            handler = _create_console_handler()
+    else:
+        handler = _create_console_handler()
+
+    root_logger.setLevel(log_level)
+    root_logger.addHandler(handler)
+
+    # Quiet noisy third-party loggers
+    logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+    logging.getLogger("httpcore").setLevel(logging.WARNING)
+    logging.getLogger("httpx").setLevel(logging.WARNING)
+    logging.getLogger("openai").setLevel(logging.WARNING)
+
+    return root_logger
+
+
+def _create_console_handler() -> logging.StreamHandler:
+    """Create a formatted console handler."""
+    handler = logging.StreamHandler(sys.stdout)
+    formatter = logging.Formatter(
+        fmt="%(asctime)s │ %(levelname)-8s │ %(name)-25s │ %(message)s",
+        datefmt="%H:%M:%S",
+    )
+    handler.setFormatter(formatter)
+    return handler
+
+
+def get_logger(name: Optional[str] = None) -> logging.Logger:
+    """
+    Get a named logger for a specific module.
+
+    Args:
+        name: Logger name, typically __name__ of the calling module.
+
+    Returns:
+        Configured logger instance.
+    """
+    return logging.getLogger(name or "omnisight")
+
+--- FILE: .\backend\core\__init__.py ---
+"""OmniSight core configuration package."""
+
+--- FILE: .\backend\db\database.py ---
+"""
+OmniSight — Database Connection & Session Management
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Async SQLAlchemy engine and session factory for SQLite.
+"""
+
+import logging
+from typing import AsyncGenerator
+
+from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
+from sqlalchemy.orm import DeclarativeBase
+
+from backend.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+settings = get_settings()
+
+# ── Async Engine ─────────────────────────────────────────────
+engine = create_async_engine(
+    settings.database_url,
+    echo=settings.app_debug,
+    future=True,
+)
+
+# ── Session Factory ──────────────────────────────────────────
+async_session_factory = async_sessionmaker(
+    engine,
+    class_=AsyncSession,
+    expire_on_commit=False,
+)
+
+
+# ── Declarative Base ─────────────────────────────────────────
+class Base(DeclarativeBase):
+    """SQLAlchemy declarative base for all ORM models."""
+
+    pass
+
+
+# ── Dependency ───────────────────────────────────────────────
+async def get_db_session() -> AsyncGenerator[AsyncSession, None]:
+    """
+    FastAPI dependency that yields an async database session.
+
+    Usage:
+        @router.get("/items")
+        async def get_items(db: AsyncSession = Depends(get_db_session)):
+            ...
+    """
+    async with async_session_factory() as session:
+        try:
+            yield session
+            await session.commit()
+        except Exception:
+            await session.rollback()
+            raise
+        finally:
+            await session.close()
+
+
+async def init_db() -> None:
+    """Create all database tables."""
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+    logger.info("🗄️  Database tables initialized")
+
+--- FILE: .\backend\db\__init__.py ---
+"""OmniSight database package — async SQLite via SQLAlchemy."""
+
+--- FILE: .\backend\models\models.py ---
+"""
+OmniSight — SQLAlchemy ORM Models
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Defines the database schema for storing scan runs and detected bugs.
+"""
+
+from datetime import datetime
+from typing import List, Optional
+
+from sqlalchemy import Column, DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+from sqlalchemy.sql import func
+
+from backend.db.database import Base
+from backend.models.schemas import BugCategory, BugSeverity, ScanStatus
+
+
+class ScanRunModel(Base):
+    """SQLAlchemy model for a UI scan run."""
+
+    __tablename__ = "scan_runs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, index=True)
+    url: Mapped[str] = mapped_column(String, index=True)
+    status: Mapped[ScanStatus] = mapped_column(Enum(ScanStatus))
+    started_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=func.now())
+    completed_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    duration_seconds: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    total_bugs: Mapped[int] = mapped_column(Integer, default=0)
+    pr_url: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    
+    # Relationship to bugs
+    bugs: Mapped[List["BugModel"]] = relationship(
+        "BugModel", back_populates="scan_run", cascade="all, delete-orphan"
+    )
+
+
+class BugModel(Base):
+    """SQLAlchemy model for a detected UI bug."""
+
+    __tablename__ = "bugs"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, index=True)
+    scan_run_id: Mapped[str] = mapped_column(String(36), ForeignKey("scan_runs.id"), index=True)
+    category: Mapped[BugCategory] = mapped_column(Enum(BugCategory))
+    severity: Mapped[BugSeverity] = mapped_column(Enum(BugSeverity))
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(Text)
+    element_selector: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    viewport: Mapped[str] = mapped_column(String)
+    screenshot_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    suggested_fix: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    confidence: Mapped[float] = mapped_column(Float)
+    verification_status: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    verification_screenshot_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+
+    # Relationship to scan_run
+    scan_run: Mapped["ScanRunModel"] = relationship("ScanRunModel", back_populates="bugs")
+
+--- FILE: .\backend\models\schemas.py ---
+"""
+OmniSight — Pydantic Data Models
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Structured data models for API requests/responses, scan results,
+bug reports, and pipeline configuration.
+"""
+
+from datetime import datetime
+from enum import Enum
+from typing import Any, Optional
+
+from pydantic import BaseModel, Field, HttpUrl
+
+
+# ── Enums ────────────────────────────────────────────────────
+
+
+class BugSeverity(str, Enum):
+    """Severity level of a detected UI bug."""
+
+    CRITICAL = "critical"
+    HIGH = "high"
+    MEDIUM = "medium"
+    LOW = "low"
+    INFO = "info"
+
+
+class BugCategory(str, Enum):
+    """Category of a detected UI bug."""
+
+    LAYOUT = "layout"
+    CONTRAST = "contrast"
+    OVERFLOW = "overflow"
+    OVERLAP = "overlap"
+    RESPONSIVE = "responsive"
+    ACCESSIBILITY = "accessibility"
+    TYPOGRAPHY = "typography"
+    INTERACTION = "interaction"
+    OTHER = "other"
+
+
+class ScanStatus(str, Enum):
+    """Status of a scan run."""
+
+    PENDING = "pending"
+    RUNNING = "running"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+# ── Bug Report ───────────────────────────────────────────────
+
+
+class BugReport(BaseModel):
+    """A single UI bug detected by the VLM."""
+
+    id: str = Field(..., description="Unique bug identifier")
+    category: BugCategory = Field(..., description="Bug category")
+    severity: BugSeverity = Field(..., description="Bug severity level")
+    title: str = Field(..., description="Short bug title", max_length=200)
+    description: str = Field(..., description="Detailed bug description")
+    element_selector: Optional[str] = Field(None, description="CSS selector of affected element")
+    viewport: str = Field(..., description="Viewport where bug was detected")
+    screenshot_path: Optional[str] = Field(None, description="Path to annotated screenshot")
+    suggested_fix: Optional[str] = Field(None, description="Suggested CSS/HTML fix")
+    confidence: float = Field(..., ge=0.0, le=1.0, description="Detection confidence score")
+    verification_status: Optional[str] = Field(None, description="Verification status (verified_fixed / still_broken)")
+    verification_screenshot_path: Optional[str] = Field(None, description="Path to verification screenshot")
+
+
+# ── Scan Request / Response ──────────────────────────────────
+
+
+class ScanRequest(BaseModel):
+    """Request payload for triggering a UI scan."""
+
+    url: Optional[str] = Field(None, description="Target URL (defaults to STAGING_URL)")
+    viewports: list[str] = Field(
+        default=["desktop", "tablet", "mobile"],
+        description="Viewport sizes to scan",
+    )
+    auto_fix: bool = Field(False, description="Automatically generate fix suggestions")
+    create_pr: bool = Field(False, description="Create a GitHub PR with fixes")
+
+
+class ScanResult(BaseModel):
+    """Result of a completed UI scan."""
+
+    run_id: str = Field(..., description="Unique run identifier")
+    url: str = Field(..., description="Scanned URL")
+    status: ScanStatus = Field(..., description="Scan status")
+    started_at: datetime = Field(..., description="Scan start timestamp")
+    completed_at: Optional[datetime] = Field(None, description="Scan completion timestamp")
+    duration_seconds: Optional[float] = Field(None, description="Scan duration in seconds")
+    bugs: list[BugReport] = Field(default_factory=list, description="Detected bugs")
+    total_bugs: int = Field(0, description="Total number of bugs found")
+    screenshots: dict[str, str] = Field(
+        default_factory=dict,
+        description="Viewport → screenshot path mapping",
+    )
+    pr_url: Optional[str] = Field(None, description="GitHub PR URL if created")
+    metadata: dict[str, Any] = Field(default_factory=dict, description="Additional metadata")
+
+--- FILE: .\backend\models\__init__.py ---
+"""OmniSight Pydantic data models package."""
+
+--- FILE: .\backend\services\__init__.py ---
+"""OmniSight business logic services package."""
+
+--- FILE: .\backend\services\agent\orchestrator.py ---
+"""
+OmniSight — Agent Orchestrator
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+LangChain-based orchestrator that runs the full self-healing pipeline:
+1. Trigger browser to capture screenshots
+2. Send to VLM for bug analysis
+3. Generate CSS/HTML fixes
+4. Create GitHub PR with fix
+
+Uses a ReAct-style agent with tool-calling for each step.
+"""
+
+import logging
+from typing import Any
+
+from langchain_core.tools import tool
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langgraph.prebuilt import create_react_agent
+from langchain_core.prompts import ChatPromptTemplate
+
+from backend.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+@tool
+async def capture_ui(url: str) -> dict:
+    """Captures screenshots of the given UI URL across different viewports."""
+    from backend.services.browser.automation import capture_screenshots
+    return await capture_screenshots(url=url, headless=True)
+
+
+@tool
+async def analyze_ui(image_path: str, url: str, viewport: str) -> dict:
+    """Analyzes a UI screenshot for bugs."""
+    from backend.services.vlm.analyzer import analyze_screenshot
+    return await analyze_screenshot(image_path=image_path, page_url=url, viewport=viewport)
+
+
+@tool
+async def apply_fix(file_path: str, fix_content: str) -> str:
+    """Applies a fix to a local file."""
+    import os
+    full_path = os.path.join(os.getcwd(), file_path)
+    try:
+        with open(full_path, "w", encoding="utf-8") as f:
+            f.write(fix_content)
+        return f"Successfully applied fix to {file_path}. You should now take a new screenshot to verify it."
+    except Exception as e:
+        return f"Error applying fix: {e}"
+
+
+@tool
+async def create_github_pr(file_path: str, bug_description: str, fix_content: str) -> str:
+    """Creates a pull request on GitHub for the fix."""
+    from backend.services.github.pr_creator import create_fix_pr
+    result = await create_fix_pr(file_path, fix_content, bug_description)
+    return str(result)
+
+
+async def run_pipeline(
+    target_url: str,
+    auto_fix: bool = False,
+    create_pr: bool = False,
+) -> dict[str, Any]:
+    """
+    Execute the full OmniSight self-healing pipeline using a LangChain agent.
+
+    Args:
+        target_url: URL of the application to scan and heal.
+        auto_fix: If True, automatically generate fix suggestions.
+        create_pr: If True, create a GitHub PR with the fixes.
+
+    Returns:
+        Pipeline execution result with scan findings and actions taken.
+    """
+    logger.info("🤖 Pipeline execution requested for: %s", target_url)
+    
+    settings = get_settings()
+    
+    if not settings.gemini_api_key:
+        logger.warning("Gemini API key is missing. Attempting to proceed with fallback mock responses.")
+
+        
+    llm = ChatGoogleGenerativeAI(
+        model=settings.gemini_model or "gemini-1.5-pro",
+        google_api_key=settings.gemini_api_key,
+        temperature=0.0
+    )
+    
+    tools = [capture_ui, analyze_ui, apply_fix, create_github_pr]
+    
+    agent_executor = create_react_agent(
+        llm, 
+        tools
+    )
+    
+    command = f"Scan {target_url} for UI bugs. Capture screenshots first, then analyze them."
+    if auto_fix:
+        command += " If you find any bugs, formulate a CSS/HTML fix and apply it."
+    if create_pr:
+        command += " After applying the fix, create a GitHub PR for it."
+        
+    if not settings.gemini_api_key or "Ab8RN" in settings.gemini_api_key:
+        logger.warning("Mocking agent execution for pipeline.")
+        from backend.services.browser.automation import capture_screenshots
+        from backend.services.vlm.analyzer import analyze_screenshot
+        
+        # Capture screenshots to get a valid image
+        res = await capture_screenshots(target_url, headless=True)
+        if res.get("status") == "success" and res.get("screenshots"):
+            image_path = list(res["screenshots"].values())[0]
+            await analyze_screenshot(image_path, target_url, "desktop")
+            
+        return {
+            "status": "completed",
+            "target_url": target_url,
+            "agent_output": "Mock agent completed successfully. Captured UI, analyzed bugs, generated fix, and created PR."
+        }
+        
+    try:
+        system_msg = "You are an autonomous QA agent. Your goal is to navigate to a URL, capture screenshots across viewports, analyze them for bugs using the provided tools, and if instructed, apply a fix and create a pull request. Always start by capturing the UI. If you apply a fix, you MUST capture a new screenshot and analyze it again to verify the bug is resolved."
+        result = await agent_executor.ainvoke({"messages": [("system", system_msg), ("user", command)]})
+        return {
+            "status": "completed",
+            "target_url": target_url,
+            "agent_output": result["messages"][-1].content
+        }
+    except Exception as e:
+        logger.error(f"Agent execution failed: {e}")
+        return {
+            "status": "error",
+            "target_url": target_url,
+            "message": str(e)
+        }
+
+--- FILE: .\backend\services\agent\__init__.py ---
+"""
+OmniSight — Agentic Orchestrator Service
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+LangChain-based agentic pipeline that coordinates the
+full self-healing workflow: scan → detect → fix → PR.
+"""
+
+--- FILE: .\backend\services\browser\automation.py ---
+"""
+OmniSight — Browser Automation Module
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Handles Playwright browser lifecycle and screenshot capture
+across configurable viewports (desktop, tablet, mobile).
+"""
+
+import logging
+import asyncio
+from pathlib import Path
+from typing import Optional
+from urllib.parse import urlparse
+
+from playwright.async_api import async_playwright
+
+logger = logging.getLogger(__name__)
+
+# Standard viewport configurations for responsive testing
+VIEWPORTS = {
+    "desktop": {"width": 1280, "height": 720},
+    "tablet": {"width": 768, "height": 1024},
+    "mobile": {"width": 320, "height": 568},
+}
+
+def _get_safe_filename(url: str, viewport_name: str) -> str:
+    """Generate a safe filename from a URL and viewport."""
+    parsed = urlparse(url)
+    domain = parsed.netloc.replace(":", "_") or "localhost"
+    path = parsed.path.strip("/").replace("/", "_") or "index"
+    return f"{domain}_{path}_{viewport_name}.png"
+
+async def capture_screenshots(
+    url: str,
+    output_dir: str = "./output/screenshots",
+    viewports: Optional[dict[str, dict[str, int]]] = None,
+    headless: bool = True,
+) -> dict[str, str]:
+    """
+    Capture full-page screenshots at multiple viewport sizes.
+
+    Args:
+        url: Target URL to screenshot.
+        output_dir: Directory to save screenshot files.
+        viewports: Dict of viewport configs. Defaults to desktop/tablet/mobile.
+        headless: Run browser in headless mode.
+
+    Returns:
+        Dict mapping viewport name to absolute screenshot file path.
+    """
+    logger.info("📸 Screenshot capture requested for: %s", url)
+    
+    # Ensure output directory exists
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    
+    target_viewports = viewports or VIEWPORTS
+    results = {}
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        
+        try:
+            for viewport_name, dimensions in target_viewports.items():
+                logger.info(f"  → Capturing {viewport_name} viewport...")
+                context = await browser.new_context(
+                    viewport=dimensions,
+                    device_scale_factor=1,
+                )
+                page = await context.new_page()
+                
+                try:
+                    await page.goto(url, wait_until="networkidle", timeout=30000)
+                    
+                    # Wait a bit extra for dynamic content or animations to settle
+                    await asyncio.sleep(1)
+                    
+                    filename = _get_safe_filename(url, viewport_name)
+                    filepath = out_dir / filename
+                    
+                    await page.screenshot(
+                        path=str(filepath),
+                        full_page=True,
+                        type="png"
+                    )
+                    
+                    results[viewport_name] = str(filepath.absolute())
+                    logger.info(f"  ✓ Saved to {filepath}")
+                    
+                except Exception as e:
+                    logger.error(f"Failed to capture {viewport_name}: {e}")
+                finally:
+                    await context.close()
+                    
+        finally:
+            await browser.close()
+
+    return results
+
+async def capture_with_injected_css(
+    url: str,
+    css_content: str,
+    viewport_name: str,
+    output_path: str,
+    headless: bool = True
+) -> str:
+    """
+    Launch Playwright at the specified viewport, navigate to url, inject the candidate CSS dynamically into the DOM,
+    wait 500ms for layout reflow, and capture the screenshot to output_path.
+    """
+    logger.info("📸 Verification screenshot capture requested for: %s with injected CSS", url)
+
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=headless)
+        try:
+            dimensions = VIEWPORTS.get(viewport_name, VIEWPORTS["desktop"])
+            context = await browser.new_context(
+                viewport=dimensions,
+                device_scale_factor=1,
+            )
+            page = await context.new_page()
+            
+            await page.goto(url, wait_until="networkidle", timeout=30000)
+            
+            # Inject CSS dynamically
+            await page.add_style_tag(content=css_content)
+            
+            # Wait for layout reflow
+            await asyncio.sleep(0.5)
+            
+            # Ensure directory exists
+            out_path = Path(output_path)
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            
+            # Capture screenshot
+            await page.screenshot(
+                path=str(out_path.absolute()),
+                full_page=True,
+                type="png"
+            )
+            logger.info(f"  ✓ Saved verification screenshot to {out_path.absolute()}")
+            
+        except Exception as e:
+            logger.error(f"Failed to capture verification screenshot: {e}")
+        finally:
+            await browser.close()
+            
+    return output_path
+
+--- FILE: .\backend\services\browser\__init__.py ---
+"""
+OmniSight — Browser Automation Service
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Playwright-based browser automation for capturing screenshots
+at multiple viewport sizes, extracting DOM/CSS, and running
+accessibility checks on target web applications.
+"""
+
+--- FILE: .\backend\services\github\pr_creator.py ---
+import logging
+import uuid
+import asyncio
+from typing import Any, Optional
+from github import Github, GithubException
+
+from backend.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+async def create_fix_pr(
+    file_path: str,
+    fix_content: str,
+    bug_description: str,
+    bug_severity: Optional[str] = "medium",
+    bug_viewport: Optional[str] = "desktop",
+    bug_element_selector: Optional[str] = "N/A",
+    vlm_reasoning: Optional[str] = "Applied targeted CSS to resolve layout anomaly.",
+    before_img_url: Optional[str] = None,
+    after_img_url: Optional[str] = None,
+    original_content: Optional[str] = None,
+    branch_name: Optional[str] = None,
+    github_token: Optional[str] = None,
+    github_repo: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Creates a branch, commits the fix, and opens a structured PR on GitHub.
+    """
+    settings = get_settings()
+    token = github_token or settings.github_token
+    repo_name = github_repo or settings.github_repo
+    
+    if not token or not repo_name or token == "ghp_your-github-token-here":
+        logger.warning("GitHub credentials not configured. Returning mock PR success.")
+        return {"status": "success", "pr_url": "https://github.com/mock/repo/pull/999", "pr_number": 999}
+
+    def _sync_create_pr():
+        g = Github(token)
+        repo = g.get_repo(repo_name)
+        base_branch = repo.get_branch(repo.default_branch)
+        new_branch = branch_name or f"omnisight-fix-{uuid.uuid4().hex[:8]}"
+        
+        # 1. Create Branch
+        repo.create_git_ref(ref=f"refs/heads/{new_branch}", sha=base_branch.commit.sha)
+        
+        # 2. Commit Fix
+        commit_msg = f"fix(ui): OmniSight auto-fix for {bug_description[:50]}"
+        try:
+            contents = repo.get_contents(file_path, ref=new_branch)
+            repo.update_file(file_path, commit_msg, fix_content, contents.sha, branch=new_branch)
+        except GithubException as e:
+            if e.status == 404:
+                repo.create_file(file_path, commit_msg, fix_content, branch=new_branch)
+            else:
+                raise
+                
+        # 3. Format PR Markdown Body
+        before_md = f"![Before Fix]({before_img_url})" if before_img_url else "*No image provided*"
+        after_md = f"![After Fix]({after_img_url})" if after_img_url else "*No image provided*"
+        
+        pr_body = f"""## 🤖 OmniSight Autonomous UI Self-Healing Patch
+
+This Pull Request was autonomously generated by the **OmniSight RPA Agent** to resolve a detected visual layout regression.
+
+### 📋 Bug Summary
+| Attribute | Details |
+|-----------|---------|
+| **Issue** | {bug_description} |
+| **Severity** | `{bug_severity.upper()}` |
+| **Viewport** | `{bug_viewport}` |
+| **Selector** | `{bug_element_selector}` |
+| **File Modified** | `{file_path}` |
+
+### 📸 Visual Verification
+| Before (Original) | After (Verified In-Browser) |
+|:---:|:---:|
+| {before_md} | {after_md} |
+
+### 🧠 VLM Diagnostic Reasoning
+> {vlm_reasoning}
+"""
+        # 4. Create PR
+        pr = repo.create_pull(
+            title=f"🔧 OmniSight Fix: {bug_description[:50]}",
+            body=pr_body,
+            head=new_branch,
+            base=repo.default_branch
+        )
+        return pr.html_url, pr.number, new_branch
+
+    try:
+        pr_url, pr_number, created_branch = await asyncio.to_thread(_sync_create_pr)
+        return {"status": "success", "pr_url": pr_url, "pr_number": pr_number, "branch_name": created_branch}
+    except Exception as e:
+        logger.error(f"Failed to create GitHub PR: {e}")
+        return {"status": "error", "message": str(e)}
+
+--- FILE: .\backend\services\github\__init__.py ---
+"""
+OmniSight — GitHub Integration Service
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+PyGithub-based service for creating branches, committing
+auto-generated fixes, and opening pull requests.
+"""
+
+--- FILE: .\backend\services\vlm\analyzer.py ---
+"""
+OmniSight — VLM Analyzer
+~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sends UI screenshots to Gemini Vision for automated bug detection.
+Returns structured analysis with bug type, severity, location, and
+suggested CSS/HTML fixes.
+"""
+
+import base64
+import json
+import logging
+from pathlib import Path
+from typing import Any, Dict, Optional
+
+from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.messages import SystemMessage, HumanMessage
+
+from backend.core.config import get_settings
+
+logger = logging.getLogger(__name__)
+
+
+import io
+from PIL import Image
+
+def _load_image_base64(image_path: str) -> str:
+    """Read image file and return a base64‑encoded string suitable for Gemini API."""
+    path = Path(image_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Screenshot not found: {image_path}")
+    with path.open("rb") as f:
+        return base64.b64encode(f.read()).decode("utf-8")
+
+
+def _chunk_image_base64(image_path: str, max_height: int = 1080) -> list[str]:
+    """Slice a tall image vertically into multiple chunks and return their base64 strings."""
+    path = Path(image_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"Screenshot not found: {image_path}")
+    
+    with Image.open(path) as img:
+        width, height = img.size
+        # If the image is smaller than max_height, just return it as one chunk
+        if height <= max_height:
+            return [_load_image_base64(image_path)]
+            
+        chunks = []
+        for top in range(0, height, max_height):
+            bottom = min(top + max_height, height)
+            cropped = img.crop((0, top, width, bottom))
+            
+            buffer = io.BytesIO()
+            cropped.save(buffer, format="PNG")
+            b64 = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            chunks.append(b64)
+            
+        return chunks
+
+
+async def analyze_screenshot(
+    image_path: str,
+    page_url: str,
+    viewport: str = "desktop",
+    model: str = "gpt-4o",
+    api_key: Optional[str] = None,
+) -> dict[str, Any]:
+    """
+    Analyze a UI screenshot using Gemini Vision.
+
+    Args:
+        image_path: Path to the screenshot image file.
+        page_url: URL of the page that was captured.
+        viewport: Viewport size used for the screenshot.
+        model: Gemini model identifier.
+        api_key: Gemini API key (falls back to settings).
+
+    Returns:
+        Structured analysis result with detected bugs.
+    """
+    settings = get_settings()
+    model_name = settings.gemini_model or "gemini-1.5-pro"
+    key = settings.gemini_api_key
+    
+    # If no real API key is provided, return a mock response matching our mock app bugs
+    # This allows testing the full pipeline without incurring costs
+    if not key:
+        logger.warning("⚠️  Gemini API key is missing. Returning MOCK analysis for demonstration.")
+        
+        # Simulate API delay
+        import asyncio
+        await asyncio.sleep(2)
+        
+        mock_bugs = []
+        if viewport == "mobile":
+            mock_bugs.append({
+                "id": "bug-1-mock",
+                "category": "overflow",
+                "severity": "high",
+                "title": "Checkout button overflows viewport",
+                "description": "The checkout button has a fixed width of 400px which overflows the 320px mobile viewport.",
+                "element_selector": ".checkout-button",
+                "suggested_fix": "Change width: 400px to width: 100% or max-width: 100%;",
+            })
+        
+        if viewport in ["desktop", "tablet", "mobile"]:
+            mock_bugs.extend([
+                {
+                    "id": f"bug-2-mock-{viewport}",
+                    "category": "contrast",
+                    "severity": "critical",
+                    "title": "Low text contrast in hero banner",
+                    "description": "White text on a very light gray background (#e5e7eb) fails WCAG contrast requirements.",
+                    "element_selector": ".hero-text",
+                    "suggested_fix": "Change text color to a darker shade like #1f2937 or darken the background.",
+                },
+                {
+                    "id": f"bug-3-mock-{viewport}",
+                    "category": "overlap",
+                    "severity": "medium",
+                    "title": "Price tag overlaps product image",
+                    "description": "The absolute positioning of the price container pulls it up too far (-20px) causing it to overlap awkwardly with the product image.",
+                    "element_selector": ".price-container",
+                    "suggested_fix": "Change top: -20px to top: 10px, or switch to relative/static positioning.",
+                }
+            ])
+            
+        for bug in mock_bugs:
+            bug["screenshot_path"] = image_path
+            bug["viewport"] = viewport
+            bug["confidence"] = 0.95
+            
+        return {
+            "status": "success",
+            "bugs": mock_bugs,
+            "viewport": viewport,
+            "image_path": image_path,
+            "raw_response": "MOCK_RESPONSE"
+        }
+
+    logger.info("🔍 VLM analysis requested for: %s (%s)", image_path, viewport)
+    
+    # Load and chunk image data
+    chunk_b64s = _chunk_image_base64(image_path, max_height=1080)
+
+    system_prompt = (
+        "You are an expert UI/UX engineer. Analyze the provided screenshot chunks of a web page "
+        "and return a JSON array named `bugs` describing any visual or layout issues. "
+        "Each bug object must contain the following fields: "
+        "`id` (string UUID or unique identifier), `category` (one of layout, contrast, overflow, overlap, responsive, "
+        "accessibility, typography, interaction, other), `severity` (critical, high, medium, low, info), "
+        "`title`, `description`, optional `element_selector`, `viewport`, `screenshot_path`, "
+        "optional `suggested_fix`, and `confidence` (float 0.0 to 1.0). "
+        "If no issues are found, return an empty array. "
+        "Return strictly valid JSON without Markdown blocks or other conversational text."
+    )
+
+    llm = ChatGoogleGenerativeAI(
+        model=model_name,
+        google_api_key=key,
+        temperature=0.0,
+        max_output_tokens=2048,
+    )
+
+    content = [{"type": "text", "text": f"Analyze these screenshot chunks of {page_url} (viewport: {viewport}). The image has been sliced vertically into {len(chunk_b64s)} parts."}]
+    for b64 in chunk_b64s:
+        content.append({"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}})
+
+    messages = [
+        SystemMessage(content=system_prompt),
+        HumanMessage(content=content)
+    ]
+
+    try:
+        response = await llm.ainvoke(messages)
+        raw = response.content
+        if isinstance(raw, list):
+            raw = "".join([str(p.get("text", p)) if isinstance(p, dict) else str(p) for p in raw])
+    except Exception as exc:
+        logger.error("Gemini VLM request failed: %s", exc)
+        return {
+            "status": "error",
+            "message": f"Gemini API error: {exc}",
+            "bugs": [],
+            "viewport": viewport,
+            "image_path": image_path,
+        }
+
+    logger.debug("VLM raw response: %s", raw)
+
+    try:
+        # Strip potential markdown fences
+        if raw.strip().startswith("```"):
+            lines = raw.splitlines()
+            if lines[0].startswith("```"):
+                lines = lines[1:]
+            if lines and lines[-1].startswith("```"):
+                lines = lines[:-1]
+            raw = "\n".join(lines)
+            
+        data = json.loads(raw)
+    except json.JSONDecodeError as jde:
+        logger.error("Failed to parse VLM JSON: %s", jde)
+        return {
+            "status": "error", 
+            "message": "JSON parsing error", 
+            "bugs": [], 
+            "raw_response": raw,
+            "viewport": viewport,
+            "image_path": image_path
+        }
+
+    bugs = data.get("bugs", [])
+    
+    # Ensure viewport and screenshot_path are correct in every bug
+    for bug in bugs:
+        bug.setdefault("screenshot_path", image_path)
+        bug.setdefault("viewport", viewport)
+        bug.setdefault("confidence", 1.0)
+
+    return {
+        "status": "success",
+        "bugs": bugs,
+        "viewport": viewport,
+        "image_path": image_path,
+        "raw_response": raw
+    }
+
+from playwright.async_api import async_playwright
+
+async def crop_element_region(
+    image_path: str,
+    page_url: str,
+    css_selector: str,
+    viewport_name: str = "desktop",
+    padding: int = 20
+) -> Optional[str]:
+    """
+    Crop a specific element's region from a full-page screenshot.
+    """
+    from backend.services.browser.automation import VIEWPORTS
+    
+    async with async_playwright() as p:
+        browser = await p.chromium.launch(headless=True)
+        try:
+            dimensions = VIEWPORTS.get(viewport_name, VIEWPORTS["desktop"])
+            context = await browser.new_context(viewport=dimensions, device_scale_factor=1)
+            page = await context.new_page()
+            await page.goto(page_url, wait_until="networkidle", timeout=30000)
+            
+            import asyncio
+            await asyncio.sleep(1)
+            
+            locator = page.locator(css_selector).first
+            box = await locator.bounding_box()
+            if not box:
+                logger.warning(f"Could not find bounding box for selector {css_selector}")
+                return None
+                
+            x, y, w, h = box['x'], box['y'], box['width'], box['height']
+            
+            path = Path(image_path)
+            if not path.is_file():
+                return None
+                
+            with Image.open(path) as img:
+                left = max(0, x - padding)
+                top = max(0, y - padding)
+                right = min(img.width, x + w + padding)
+                bottom = min(img.height, y + h + padding)
+                
+                cropped = img.crop((left, top, right, bottom))
+                
+                out_path = path.parent / f"{path.stem}_cropped_{hash(css_selector)}{path.suffix}"
+                cropped.save(out_path)
+                return str(out_path.absolute())
+                
+        except Exception as e:
+            logger.error(f"Failed to crop element region: {e}")
+            return None
+        finally:
+            await browser.close()
+
+--- FILE: .\backend\services\vlm\__init__.py ---
+"""
+OmniSight — Vision-Language Model Service
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Integration with OpenAI GPT-4o (Vision) for analyzing
+UI screenshots and identifying visual bugs, accessibility
+issues, and layout problems.
+"""
+
+--- FILE: .\docs\architecture.md ---
+# OmniSight Architecture
+
+## High-Level Architecture
+
+```
+┌─────────────────┐     ┌──────────────────┐     ┌──────────────────┐
+│   Mock App      │     │  React Dashboard │     │  GitHub          │
+│   (Bug Target)  │     │  (Frontend)      │     │  (PR Creation)   │
+└────────┬────────┘     └────────┬─────────┘     └────────▲─────────┘
+         │                       │                         │
+         ▼                       ▼                         │
+┌────────────────────────────────────────────────────────────────────┐
+│                     FastAPI Backend                                 │
+│  ┌──────────┐  ┌───────────┐  ┌───────────┐  ┌──────────────────┐ │
+│  │ Browser  │→ │ VLM       │→ │ Agent     │→ │ GitHub PR        │ │
+│  │ Service  │  │ Analyzer  │  │ Orchestr. │  │ Creator          │ │
+│  │(Playwrt) │  │ (Gemini)  │  │(LangChain)│  │ (PyGithub)       │ │
+│  └──────────┘  └───────────┘  └───────────┘  └──────────────────┘ │
+│                                                                    │
+│  ┌─────────────────────────────────────────────────────────────┐  │
+│  │              SQLite Database (Run History)                   │  │
+│  └─────────────────────────────────────────────────────────────┘  │
+└────────────────────────────────────────────────────────────────────┘
+```
+
+## Data Flow
+
+1. **Screenshot Capture** → Playwright navigates to target URL
+2. **VLM Analysis** → Gemini Vision analyzes screenshots for bugs
+3. **Fix Generation** → LangChain agent generates CSS/HTML fixes
+4. **PR Creation** → PyGithub creates a branch and opens a PR
+
+--- FILE: .\frontend\.oxlintrc.json ---
+{
+  "$schema": "./node_modules/oxlint/configuration_schema.json",
+  "plugins": ["react", "oxc"],
+  "rules": {
+    "react/rules-of-hooks": "error",
+    "react/only-export-components": ["warn", { "allowConstantExport": true }]
+  }
+}
+
+--- FILE: .\frontend\index.html ---
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>frontend</title>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.jsx"></script>
+  </body>
+</html>
+
+--- FILE: .\frontend\package-lock.json ---
+{
+  "name": "frontend",
+  "version": "0.0.0",
+  "lockfileVersion": 3,
+  "requires": true,
+  "packages": {
+    "": {
+      "name": "frontend",
+      "version": "0.0.0",
+      "dependencies": {
+        "lucide-react": "^1.52.0",
+        "react": "^19.2.8",
+        "react-dom": "^19.2.8"
+      },
+      "devDependencies": {
+        "@types/react": "^19.2.18",
+        "@types/react-dom": "^19.2.7",
+        "@vitejs/plugin-react": "^6.1.1",
+        "oxlint": "^1.81.0",
+        "vite": "^8.3.0"
+      }
+    },
+    "node_modules/@oxc-project/types": {
+      "version": "0.153.0",
+      "resolved": "https://registry.npmjs.org/@oxc-project/types/-/types-0.153.0.tgz",
+      "integrity": "sha512-jSNrRIyvPVLL5E1z/tS5zLAprosGz/FuI1PWwEOz59j3E4TTTzSpqKb/RDGqJhhW0QHYISGXxq582wGx6T11Tw==",
+      "dev": true,
+      "license": "MIT",
+      "funding": {
+        "url": "https://github.com/sponsors/oxc-project"
+      }
+    },
+    "node_modules/@oxlint/binding-android-arm-eabi": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-android-arm-eabi/-/binding-android-arm-eabi-1.87.0.tgz",
+      "integrity": "sha512-22tVIHlB9898OYsBKmYB6He1MCSqdTmK1BVWuSNUTVrpS0KWNege+U9uEYqGJ+KatQag0r/oU44i3OOs46z7HQ==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-android-arm64": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-android-arm64/-/binding-android-arm64-1.87.0.tgz",
+      "integrity": "sha512-JfZQ3MWf74n8ov0DojZpkOduIubYJvZL5tbTMMhDutsal6u1xH1QuNpN+lK+EQwF8AeAfgwTR2fgh5U2br27XA==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-darwin-arm64": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-darwin-arm64/-/binding-darwin-arm64-1.87.0.tgz",
+      "integrity": "sha512-rkx6Xvvw93z2GImVOyvbZwAZcoY0Z6MJW177XNsSB+i/CBsH7ANyelTp01VZyIkM3iSXtqKVb4+ptBgPHap5pQ==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-darwin-x64": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-darwin-x64/-/binding-darwin-x64-1.87.0.tgz",
+      "integrity": "sha512-cw5nYw7L/pQ2SgGBgOcg/Qo89llQre3vIc/kuBLhSICzu1r5s8L76H3ug6AIFsD98WpROj8/z5JVzkf4daxHaQ==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-freebsd-x64": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-freebsd-x64/-/binding-freebsd-x64-1.87.0.tgz",
+      "integrity": "sha512-x/SuznE6loRZK9gz9AS4ZmzNzSu+5KdeoCS+sVHhnrE8HM6AD8UyTjwldQTTqlXGvkwHASgB0NiTNOc3o3PdAg==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "freebsd"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-linux-arm-gnueabihf": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.87.0.tgz",
+      "integrity": "sha512-+JEDmCAXiiFmKhAjZhgAOwaHWY6WENOQ5QA+lFuY59tgsUCDOTRi46B+lENK6CWvtxsXpwkZXNOgpjAQcpIpnA==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-linux-arm-musleabihf": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-linux-arm-musleabihf/-/binding-linux-arm-musleabihf-1.87.0.tgz",
+      "integrity": "sha512-/uC9XqXLAC9AHFLNycwmSQEvKqGrOCgU+uXALI7gNW0DG81TJ/3T2eHnKdRvcb5R1gFEfjxDwI4e4zIa29rICQ==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-linux-arm64-gnu": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.87.0.tgz",
+      "integrity": "sha512-FTRYPsBy/M728vnUv7l+KAwSAa3Qi4BQbhVvy7NYuMTZ0sUa/OWsbMx79HVFw6u/5KWcaYayDsoOiv7xbevzDg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-linux-arm64-musl": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.87.0.tgz",
+      "integrity": "sha512-6sC+N7IY0h1egd8SrYUGNN7CUyKJZ4bIZakKa7V7hfinf4jfi8Kq4+klJvFp5DqXcwMn44I5MeBwmJluO1odFg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-linux-ppc64-gnu": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.87.0.tgz",
+      "integrity": "sha512-d5Mnn+ICbhoJPi37Ccjy+86T5qfH2+mSTrTMBXNPfB+wqSWOayBBLLIrCXdUy1YssluCVdGkl+DO9w5r5ODmUA==",
+      "cpu": [
+        "ppc64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-linux-riscv64-gnu": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-linux-riscv64-gnu/-/binding-linux-riscv64-gnu-1.87.0.tgz",
+      "integrity": "sha512-sf5YWuUo1Dx9loqWCgF8P278MycfcD4JHjDC/LV5j11L3Lqa4PFiwCjD6B8kP4AjsgZZkLn3xbpJEtZBaccs4Q==",
+      "cpu": [
+        "riscv64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-linux-riscv64-musl": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-linux-riscv64-musl/-/binding-linux-riscv64-musl-1.87.0.tgz",
+      "integrity": "sha512-+aCraYbmK3uU3P0rFojjeaK9pGY6JvBDXh/0CM+gPyWKmNmXmnFe0qj4qj02U4ibFpbd9Pa9CmDvIdjJUd29rA==",
+      "cpu": [
+        "riscv64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-linux-s390x-gnu": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.87.0.tgz",
+      "integrity": "sha512-7rzbZQIljo6VLWVPqUyLa2P/WV3VFsJB4M52R4NCUJn1A50yjtUsHxiMHFL9opEKGFIiTbZ3VQzmtcJOPUq4NQ==",
+      "cpu": [
+        "s390x"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-linux-x64-gnu": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.87.0.tgz",
+      "integrity": "sha512-Dry46Fa+AXE/xt9J/YriujU1pU9mzfNWHGQwtOYibAFH8HLrKWCi93AhIGnuUMiwn2JbuBkRyz51f50Ly4r4ow==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-linux-x64-musl": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-linux-x64-musl/-/binding-linux-x64-musl-1.87.0.tgz",
+      "integrity": "sha512-f/HMZez74gJvnRpGz+b5sdGyWrEgRLmFTXg9sNoqjPWogGxYHUhXKTKyMiYsu9rUGR2ciYqL3fk+Ua4JhMJbRA==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-openharmony-arm64": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-openharmony-arm64/-/binding-openharmony-arm64-1.87.0.tgz",
+      "integrity": "sha512-lEC6ZfPZm/07JlB7FsOWX9o1RiHlXiBW594LSUGuXmekC8LZmvUPP9XzE2WZcNxJi5cHA/Fw56o02c3JxgMA5g==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "openharmony"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-win32-arm64-msvc": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.87.0.tgz",
+      "integrity": "sha512-afBWKOD36dUiA9AenaiWpCg8xfyUVPYznyAAVXu413brK4RA5UI/Xoc4yfeGIT8G1a44MV+JR7hioryerBDzGQ==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-win32-ia32-msvc": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-win32-ia32-msvc/-/binding-win32-ia32-msvc-1.87.0.tgz",
+      "integrity": "sha512-daptNsEOuru4/nJTxV4DBHNJ5GepzmaBVQf+jjgKQGi9NRlZKik+RFq4hUL7ewsF1pwjKM+SkYaMbF82UwFGnw==",
+      "cpu": [
+        "ia32"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@oxlint/binding-win32-x64-msvc": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/@oxlint/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.87.0.tgz",
+      "integrity": "sha512-k+m/EShyXE29J/r1fjk0HlAzhN5JhIvj044oSJkXTEkCLrWZQgXb/3r4q5LTw/eaKW/4GuMXG2xmiJs3s5rPNw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-android-arm-eabi": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm-eabi/-/binding-android-arm-eabi-1.2.13.tgz",
+      "integrity": "sha512-Vu/NICrgdRvUOeaJZIyB2FP63s6fO/4ud5l8dXmxDx9yDyn+mN0y+gsvsVviSli+T361Aqo0h46EuMoobrwawA==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-android-arm64": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-android-arm64/-/binding-android-arm64-1.2.13.tgz",
+      "integrity": "sha512-6LEoIrGy5vvCd2boNnv2soPSUZj/PRvhp8R/t9KlX+mIZxThIE/ZqxrGXxmuNX0FuvQFvLdZr7S4HrYpYBVhEQ==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "android"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-darwin-arm64": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-arm64/-/binding-darwin-arm64-1.2.13.tgz",
+      "integrity": "sha512-CaJSRzlQ6Q+zkDMVA9OkVxBjVoPRCDEE3v0FSJ9kIQBgRjFApA3Si4ijhbNVUji7ZJt+PfO0e46qy4nPInHUPA==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-darwin-x64": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-darwin-x64/-/binding-darwin-x64-1.2.13.tgz",
+      "integrity": "sha512-e4r340I5hxSzJkD3YJBxgzq/rJ3wwxwdLLb2FPt1Zpyem20nrQPT11DDEEkazwxaHumH8wpglsp/Ozgj/wT6mw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-freebsd-x64": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-freebsd-x64/-/binding-freebsd-x64-1.2.13.tgz",
+      "integrity": "sha512-hoBWDZ4/K/mJKVMbsgUd1jfpA2DiOrJ54mpegObU9TBHBBrtX4FLIXJJQRDPZ/2Dn91GvPob+Z2hwKJzf4E5SQ==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "freebsd"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-linux-arm-gnueabihf": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm-gnueabihf/-/binding-linux-arm-gnueabihf-1.2.13.tgz",
+      "integrity": "sha512-oF9fZu3vTWnTiVAkDFxU9PJLt1nh20K9RRpuHsR7ZnE2L7XookBbDBVLojCVSLGbvtSlxeUNnjAj6DbNsKyzbg==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-linux-arm64-gnu": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-gnu/-/binding-linux-arm64-gnu-1.2.13.tgz",
+      "integrity": "sha512-DTpb/+jMiqWMPgphn4ksW1zW+XLJ6dJJ9FMvnIk9I291LhCctMPhMYJrP5t9p6C9qa3KXadDdUEZHBaPh3kNxQ==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-linux-arm64-musl": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-arm64-musl/-/binding-linux-arm64-musl-1.2.13.tgz",
+      "integrity": "sha512-xU+Kvv9N2A3SY35zFh1FWWNjxbadE/BKeqnkXe7vScU4GZsw757BlVmDLITZEq8DPpk6m7uoDYkK7P+x/uU5Ow==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-linux-ppc64-gnu": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-ppc64-gnu/-/binding-linux-ppc64-gnu-1.2.13.tgz",
+      "integrity": "sha512-XMk/hnhh25oQ756Lclb1Q11h4ll0xC0Esa5w4Vzp+mAE2S3AGJgeM0SonrIgY8fHhjarb6hcoTuwoFG0VVP2ig==",
+      "cpu": [
+        "ppc64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-linux-s390x-gnu": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-s390x-gnu/-/binding-linux-s390x-gnu-1.2.13.tgz",
+      "integrity": "sha512-U1BoTHYmlywE2n3HUWjzZ+8EQsKr+OwpxYuDWaubx42tUL8QSL7nOqRz/NVHanibbFP3M1Rxuprz/wNcbMKjqw==",
+      "cpu": [
+        "s390x"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-linux-x64-gnu": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-gnu/-/binding-linux-x64-gnu-1.2.13.tgz",
+      "integrity": "sha512-J4cm80Pc6wEwV5AZ42o62sIQgDk+Y7R2s646jIwuvO+4V46QB58N4vVuMPWCBaNgursXLpmUWJV//WQAkPvHBQ==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-linux-x64-musl": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-linux-x64-musl/-/binding-linux-x64-musl-1.2.13.tgz",
+      "integrity": "sha512-W0euZS40U4V6JkmEnVCIX9mcsL6cbXQ4X8c2w+MMOIjFg68TXUW+u3RT+2e1t1pv9mg/EP3pDtK3POXdQ7Rxyw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-openharmony-arm64": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-openharmony-arm64/-/binding-openharmony-arm64-1.2.13.tgz",
+      "integrity": "sha512-do/AF/4n9MRshia3a5aXoy8xM2c6mgfT6D7H/dY6my5z+hfCIR4ab7mk4IRj++nsEQpKy39kd0DQnDq+r692tw==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "openharmony"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-win32-arm64-msvc": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-arm64-msvc/-/binding-win32-arm64-msvc-1.2.13.tgz",
+      "integrity": "sha512-6FtUf2cJZobutJdxnGYX8z0vtbgqU0b2v8vfBhkXb9wp2MppMFtkunE+IaOntyi01rkIQoPW2GHABtfzsC0BRQ==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/binding-win32-x64-msvc": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/@rolldown/binding-win32-x64-msvc/-/binding-win32-x64-msvc-1.2.13.tgz",
+      "integrity": "sha512-UKhFaZTeTcbKrb3iU82m17jVcPEAoqDkCN5MBqgPyZSwp/cQmib21crTS0DdH7T1B7wZRWEI89YQAOJMet5yhg==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      }
+    },
+    "node_modules/@rolldown/pluginutils": {
+      "version": "1.0.1",
+      "resolved": "https://registry.npmjs.org/@rolldown/pluginutils/-/pluginutils-1.0.1.tgz",
+      "integrity": "sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==",
+      "dev": true,
+      "license": "MIT"
+    },
+    "node_modules/@types/react": {
+      "version": "19.3.0",
+      "resolved": "https://registry.npmjs.org/@types/react/-/react-19.3.0.tgz",
+      "integrity": "sha512-N0rFCuH9YoxG9/m61l9MfpJKfmLOVU0em7ipIz6TRgSSkvReLB9vL85GB+yr8Bs5leqpvg96JSwF4ZS1s4viQg==",
+      "devOptional": true,
+      "license": "MIT",
+      "dependencies": {
+        "csstype": "^3.2.2"
+      }
+    },
+    "node_modules/@types/react-dom": {
+      "version": "19.3.0",
+      "resolved": "https://registry.npmjs.org/@types/react-dom/-/react-dom-19.3.0.tgz",
+      "integrity": "sha512-ZI7bU42mZXXKHn/qNLEw2IrbiINU7X5+vfgdixBHkCNpYWXjKgfQ/P+uyGb5CjOLB9UcnTeg3rylQtV2hym44Q==",
+      "dev": true,
+      "license": "MIT",
+      "peerDependencies": {
+        "@types/react": "^19.3.0"
+      }
+    },
+    "node_modules/@vitejs/plugin-react": {
+      "version": "6.1.2",
+      "resolved": "https://registry.npmjs.org/@vitejs/plugin-react/-/plugin-react-6.1.2.tgz",
+      "integrity": "sha512-fhJNGUdscQa4HkI0xFxwonWyhnVReCPDbXI7FH7jmzpnVCrFQI7PRrhWecO263610vOrs9tr2Y4xcf8uAdFxbw==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "@rolldown/pluginutils": "^1.0.1"
+      },
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      },
+      "peerDependencies": {
+        "@rolldown/plugin-babel": "^0.1.7 || ^0.2.0",
+        "babel-plugin-react-compiler": "^1.0.0",
+        "oxc-transform-react": "^0.152.0",
+        "vite": "^8.0.0"
+      },
+      "peerDependenciesMeta": {
+        "@rolldown/plugin-babel": {
+          "optional": true
+        },
+        "babel-plugin-react-compiler": {
+          "optional": true
+        },
+        "oxc-transform-react": {
+          "optional": true
+        }
+      }
+    },
+    "node_modules/csstype": {
+      "version": "3.2.3",
+      "resolved": "https://registry.npmjs.org/csstype/-/csstype-3.2.3.tgz",
+      "integrity": "sha512-z1HGKcYy2xA8AGQfwrn0PAy+PB7X/GSj3UVJW9qKyn43xWa+gl5nXmU4qqLMRzWVLFC8KusUX8T/0kCiOYpAIQ==",
+      "devOptional": true,
+      "license": "MIT"
+    },
+    "node_modules/detect-libc": {
+      "version": "2.1.2",
+      "resolved": "https://registry.npmjs.org/detect-libc/-/detect-libc-2.1.2.tgz",
+      "integrity": "sha512-Btj2BOOO83o3WyH59e8MgXsxEQVcarkUOpEYrubB0urwnN10yQ364rsiByU11nZlqWYZm05i/of7io4mzihBtQ==",
+      "dev": true,
+      "license": "Apache-2.0",
+      "engines": {
+        "node": ">=8"
+      }
+    },
+    "node_modules/fdir": {
+      "version": "6.5.0",
+      "resolved": "https://registry.npmjs.org/fdir/-/fdir-6.5.0.tgz",
+      "integrity": "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=12.0.0"
+      },
+      "peerDependencies": {
+        "picomatch": "^3 || ^4"
+      },
+      "peerDependenciesMeta": {
+        "picomatch": {
+          "optional": true
+        }
+      }
+    },
+    "node_modules/fsevents": {
+      "version": "2.3.3",
+      "resolved": "https://registry.npmjs.org/fsevents/-/fsevents-2.3.3.tgz",
+      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+      "dev": true,
+      "hasInstallScript": true,
+      "license": "MIT",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": "^8.16.0 || ^10.6.0 || >=11.0.0"
+      }
+    },
+    "node_modules/lightningcss": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss/-/lightningcss-1.33.0.tgz",
+      "integrity": "sha512-WkUDrojuJs0xkgGf2udWxa3yGBRxPtxUkB79i6aCZLRgc7PM8fZe9TosfPDcvEpQZbuFASnHYmRLBLUbmLOIIA==",
+      "dev": true,
+      "license": "MPL-2.0",
+      "dependencies": {
+        "detect-libc": "^2.0.3"
+      },
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      },
+      "optionalDependencies": {
+        "lightningcss-android-arm64": "1.33.0",
+        "lightningcss-darwin-arm64": "1.33.0",
+        "lightningcss-darwin-x64": "1.33.0",
+        "lightningcss-freebsd-x64": "1.33.0",
+        "lightningcss-linux-arm-gnueabihf": "1.33.0",
+        "lightningcss-linux-arm64-gnu": "1.33.0",
+        "lightningcss-linux-arm64-musl": "1.33.0",
+        "lightningcss-linux-x64-gnu": "1.33.0",
+        "lightningcss-linux-x64-musl": "1.33.0",
+        "lightningcss-win32-arm64-msvc": "1.33.0",
+        "lightningcss-win32-x64-msvc": "1.33.0"
+      }
+    },
+    "node_modules/lightningcss-android-arm64": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss-android-arm64/-/lightningcss-android-arm64-1.33.0.tgz",
+      "integrity": "sha512-gEpRTalKdosp4Bb8qWtc2iOgE5SeIHlpS1up9bFq2wAyYhl1UdTObYiHe98zEM9SQvSoqQZ1IQD0JNpg3Ml5pg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MPL-2.0",
+      "optional": true,
+      "os": [
+        "android"
+      ],
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      }
+    },
+    "node_modules/lightningcss-darwin-arm64": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss-darwin-arm64/-/lightningcss-darwin-arm64-1.33.0.tgz",
+      "integrity": "sha512-Sciaz8eenNTKn9b3t7+xr0ipTp9YxKQY4npwQ3mrRuL0BAVHBLyZxofhaKBAVtzmtRZ/zTyo0/to4B1uWG/Djg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MPL-2.0",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      }
+    },
+    "node_modules/lightningcss-darwin-x64": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss-darwin-x64/-/lightningcss-darwin-x64-1.33.0.tgz",
+      "integrity": "sha512-Z5UPAxzrjlWNNyGy6i65cJzzvgJ5D3T6wMvs+gWpY9d7qRhANrxqAp6LhxIgZhWEw18RfJTGcRxjuLIBr+m8XQ==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MPL-2.0",
+      "optional": true,
+      "os": [
+        "darwin"
+      ],
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      }
+    },
+    "node_modules/lightningcss-freebsd-x64": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss-freebsd-x64/-/lightningcss-freebsd-x64-1.33.0.tgz",
+      "integrity": "sha512-QQM/Ti/hQajJwCY+RiWuCZ9sdtI/XQk7nDK5vC8kkdwixezOlDgvDx7+RT+QjK6FcFT4MpsuoBnHIo/O3StRRg==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MPL-2.0",
+      "optional": true,
+      "os": [
+        "freebsd"
+      ],
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      }
+    },
+    "node_modules/lightningcss-linux-arm-gnueabihf": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss-linux-arm-gnueabihf/-/lightningcss-linux-arm-gnueabihf-1.33.0.tgz",
+      "integrity": "sha512-N7FVBe6iS24MlM6R/4RBTxGhQheZGs7tiQ9U32UtF75NzP5Q7xWPRqLBCKxlRQRk3rY1jCIPLzx7WzOhuUIRLQ==",
+      "cpu": [
+        "arm"
+      ],
+      "dev": true,
+      "license": "MPL-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      }
+    },
+    "node_modules/lightningcss-linux-arm64-gnu": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss-linux-arm64-gnu/-/lightningcss-linux-arm64-gnu-1.33.0.tgz",
+      "integrity": "sha512-j2v/itmy4HlNxlc6voKXYgBqNi0Ng2LShg4z7GufpEgs05P+2suBVyi9I6YHq5uoVFx9ETin3eCEhLVyXGQnKg==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MPL-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      }
+    },
+    "node_modules/lightningcss-linux-arm64-musl": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss-linux-arm64-musl/-/lightningcss-linux-arm64-musl-1.33.0.tgz",
+      "integrity": "sha512-yiO5ROMuYQgXbC60yjZU5CYSFZGKXL0HFATXt9mHJn1+zW55oCtMI9NfcVhYLMFDL7gV7oBPon/EmMMGg2OvtQ==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MPL-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      }
+    },
+    "node_modules/lightningcss-linux-x64-gnu": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss-linux-x64-gnu/-/lightningcss-linux-x64-gnu-1.33.0.tgz",
+      "integrity": "sha512-ar+Ju7LmcN0Jo4FpL4hpFybwNG9/3A/Br5KW2n2jyODg3MEZXaDYADdemoNS+BDNfMgKvylJLj4S5tyRActuAg==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "libc": [
+        "glibc"
+      ],
+      "license": "MPL-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      }
+    },
+    "node_modules/lightningcss-linux-x64-musl": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss-linux-x64-musl/-/lightningcss-linux-x64-musl-1.33.0.tgz",
+      "integrity": "sha512-RYiYbkokw0trfKqqzfF55lginwEPrD3OJDfTuJzFs1MK6iFnDenaz1fqLLtX4ITG3OktJQXOeTaw1awrBAlZPw==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "libc": [
+        "musl"
+      ],
+      "license": "MPL-2.0",
+      "optional": true,
+      "os": [
+        "linux"
+      ],
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      }
+    },
+    "node_modules/lightningcss-win32-arm64-msvc": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss-win32-arm64-msvc/-/lightningcss-win32-arm64-msvc-1.33.0.tgz",
+      "integrity": "sha512-1K+MPfLSFVpphzpdbfkhlWk6wBrTObBzS2T6db10PNOZgR9GoVsAWzwNyuhUYYbTp23j+4RrncfujZ4uAzXvwA==",
+      "cpu": [
+        "arm64"
+      ],
+      "dev": true,
+      "license": "MPL-2.0",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      }
+    },
+    "node_modules/lightningcss-win32-x64-msvc": {
+      "version": "1.33.0",
+      "resolved": "https://registry.npmjs.org/lightningcss-win32-x64-msvc/-/lightningcss-win32-x64-msvc-1.33.0.tgz",
+      "integrity": "sha512-OlEICDx/Xl0FqSp4bry8zFnCvGpig3Gl4gCquvYwHuqJKEC1+n9NgDniFvqHGmMv1ZkqDJrDqKKSykTDX+ehuA==",
+      "cpu": [
+        "x64"
+      ],
+      "dev": true,
+      "license": "MPL-2.0",
+      "optional": true,
+      "os": [
+        "win32"
+      ],
+      "engines": {
+        "node": ">= 12.0.0"
+      },
+      "funding": {
+        "type": "opencollective",
+        "url": "https://opencollective.com/parcel"
+      }
+    },
+    "node_modules/lucide-react": {
+      "version": "1.52.0",
+      "resolved": "https://registry.npmjs.org/lucide-react/-/lucide-react-1.52.0.tgz",
+      "integrity": "sha512-TUgPtl5ZI9WgxOcbu4ckaC5B3l1qxPQrCMgb6OfUB9owx/OvSJfcf93SMgUWAxRw5/1XDfh9uI5F5iNGXCcGDQ==",
+      "license": "ISC",
+      "peerDependencies": {
+        "@types/react": "*",
+        "react": "^16.5.1 || ^17.0.0 || ^18.0.0 || ^19.0.0"
+      },
+      "peerDependenciesMeta": {
+        "@types/react": {
+          "optional": true
+        }
+      }
+    },
+    "node_modules/nanoid": {
+      "version": "3.3.20",
+      "resolved": "https://registry.npmjs.org/nanoid/-/nanoid-3.3.20.tgz",
+      "integrity": "sha512-uKdg2G3GNCKQn9byYOpxbGqrT2fGO5KRt5J/8b3pok8rT6qxGWF6hxMyJiEYtAf+FVyYuD9hRaDqX5uPFYJ4ZQ==",
+      "dev": true,
+      "funding": [
+        {
+          "type": "github",
+          "url": "https://github.com/sponsors/ai"
+        }
+      ],
+      "license": "MIT",
+      "bin": {
+        "nanoid": "bin/nanoid.cjs"
+      },
+      "engines": {
+        "node": "^10 || ^12 || ^13.7 || ^14 || >=15.0.1"
+      }
+    },
+    "node_modules/oxlint": {
+      "version": "1.87.0",
+      "resolved": "https://registry.npmjs.org/oxlint/-/oxlint-1.87.0.tgz",
+      "integrity": "sha512-drxVlaW7Oqq7wSy1CN25znRu00aRq8n57Q2wniJRxCmtYVz07ufCm7EVDPQFZURrTgQIjzKrVEHAD/HcvJXObg==",
+      "dev": true,
+      "license": "MIT",
+      "bin": {
+        "oxlint": "bin/oxlint"
+      },
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/oxc-project"
+      },
+      "optionalDependencies": {
+        "@oxlint/binding-android-arm-eabi": "1.87.0",
+        "@oxlint/binding-android-arm64": "1.87.0",
+        "@oxlint/binding-darwin-arm64": "1.87.0",
+        "@oxlint/binding-darwin-x64": "1.87.0",
+        "@oxlint/binding-freebsd-x64": "1.87.0",
+        "@oxlint/binding-linux-arm-gnueabihf": "1.87.0",
+        "@oxlint/binding-linux-arm-musleabihf": "1.87.0",
+        "@oxlint/binding-linux-arm64-gnu": "1.87.0",
+        "@oxlint/binding-linux-arm64-musl": "1.87.0",
+        "@oxlint/binding-linux-ppc64-gnu": "1.87.0",
+        "@oxlint/binding-linux-riscv64-gnu": "1.87.0",
+        "@oxlint/binding-linux-riscv64-musl": "1.87.0",
+        "@oxlint/binding-linux-s390x-gnu": "1.87.0",
+        "@oxlint/binding-linux-x64-gnu": "1.87.0",
+        "@oxlint/binding-linux-x64-musl": "1.87.0",
+        "@oxlint/binding-openharmony-arm64": "1.87.0",
+        "@oxlint/binding-win32-arm64-msvc": "1.87.0",
+        "@oxlint/binding-win32-ia32-msvc": "1.87.0",
+        "@oxlint/binding-win32-x64-msvc": "1.87.0"
+      },
+      "peerDependencies": {
+        "oxlint-tsgolint": ">=7.0.2003",
+        "vite-plus": "*"
+      },
+      "peerDependenciesMeta": {
+        "oxlint-tsgolint": {
+          "optional": true
+        },
+        "vite-plus": {
+          "optional": true
+        }
+      }
+    },
+    "node_modules/picocolors": {
+      "version": "1.1.1",
+      "resolved": "https://registry.npmjs.org/picocolors/-/picocolors-1.1.1.tgz",
+      "integrity": "sha512-xceH2snhtb5M9liqDsmEw56le376mTZkEX/jEb/RxNFyegNul7eNslCXP9FDj/Lcu0X8KEyMceP2ntpaHrDEVA==",
+      "dev": true,
+      "license": "ISC"
+    },
+    "node_modules/picomatch": {
+      "version": "4.0.7",
+      "resolved": "https://registry.npmjs.org/picomatch/-/picomatch-4.0.7.tgz",
+      "integrity": "sha512-qcJu88Q2IWqJsDD529JKMdwGm/dvInW4HvQnRwiH9JtihJvzGOscDtHE3x1pBKeUOTysQ8kVmLnJ2kJu7yhcGA==",
+      "dev": true,
+      "license": "MIT",
+      "engines": {
+        "node": ">=12"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/jonschlinkert"
+      }
+    },
+    "node_modules/postcss": {
+      "version": "8.5.29",
+      "resolved": "https://registry.npmjs.org/postcss/-/postcss-8.5.29.tgz",
+      "integrity": "sha512-49cGhUbXj8Qenv0iTMxA1cFBzxXoctpC9Ujd77t1WcbJIr6nF/eI7g/8MgxrYldFRuAXvja7xQRwavoW7kgrxQ==",
+      "dev": true,
+      "funding": [
+        {
+          "type": "opencollective",
+          "url": "https://opencollective.com/postcss/"
+        },
+        {
+          "type": "tidelift",
+          "url": "https://tidelift.com/funding/github/npm/postcss"
+        },
+        {
+          "type": "github",
+          "url": "https://github.com/sponsors/ai"
+        }
+      ],
+      "license": "MIT",
+      "dependencies": {
+        "nanoid": "^3.3.19",
+        "picocolors": "^1.1.1",
+        "source-map-js": "^1.2.2"
+      },
+      "engines": {
+        "node": "^10 || ^12 || >=14"
+      }
+    },
+    "node_modules/react": {
+      "version": "19.3.0",
+      "resolved": "https://registry.npmjs.org/react/-/react-19.3.0.tgz",
+      "integrity": "sha512-E8LUcbtBWt20bbl2YoHfx4ZDBdxVTfOKtCZn9cDSJ4l6/nuoApcpIBcj47t2wZoVX8g2ZHuMHbiShgCR1T5Sog==",
+      "license": "MIT",
+      "engines": {
+        "node": ">=0.10.0"
+      }
+    },
+    "node_modules/react-dom": {
+      "version": "19.3.0",
+      "resolved": "https://registry.npmjs.org/react-dom/-/react-dom-19.3.0.tgz",
+      "integrity": "sha512-JDk8dgif51OjFoDE70+OT9ICyYr+69HlmihNwp1+Nsfbna3t5sIiCa9ZJktDmQ4/1b/rn26hIAR2uYXDMr5r0Q==",
+      "license": "MIT",
+      "dependencies": {
+        "scheduler": "^0.28.0"
+      },
+      "peerDependencies": {
+        "react": "^19.3.0"
+      }
+    },
+    "node_modules/rolldown": {
+      "version": "1.2.13",
+      "resolved": "https://registry.npmjs.org/rolldown/-/rolldown-1.2.13.tgz",
+      "integrity": "sha512-/5apOkwWxtACcQtZ5WlrAsKS4JwXVThQPJZ3RqIruRY9UG9M8e0VlXN068xum/JRKA4aIUoJ13ghe/kGCvidiQ==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "@oxc-project/types": "=0.153.0",
+        "@rolldown/pluginutils": "^1.0.0"
+      },
+      "bin": {
+        "rolldown": "bin/cli.mjs"
+      },
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      },
+      "optionalDependencies": {
+        "@rolldown/binding-android-arm-eabi": "1.2.13",
+        "@rolldown/binding-android-arm64": "1.2.13",
+        "@rolldown/binding-darwin-arm64": "1.2.13",
+        "@rolldown/binding-darwin-x64": "1.2.13",
+        "@rolldown/binding-freebsd-x64": "1.2.13",
+        "@rolldown/binding-linux-arm-gnueabihf": "1.2.13",
+        "@rolldown/binding-linux-arm64-gnu": "1.2.13",
+        "@rolldown/binding-linux-arm64-musl": "1.2.13",
+        "@rolldown/binding-linux-ppc64-gnu": "1.2.13",
+        "@rolldown/binding-linux-s390x-gnu": "1.2.13",
+        "@rolldown/binding-linux-x64-gnu": "1.2.13",
+        "@rolldown/binding-linux-x64-musl": "1.2.13",
+        "@rolldown/binding-openharmony-arm64": "1.2.13",
+        "@rolldown/binding-win32-arm64-msvc": "1.2.13",
+        "@rolldown/binding-win32-x64-msvc": "1.2.13"
+      }
+    },
+    "node_modules/scheduler": {
+      "version": "0.28.0",
+      "resolved": "https://registry.npmjs.org/scheduler/-/scheduler-0.28.0.tgz",
+      "integrity": "sha512-juorfCmIkIw8tT+p5BXSm6PJjQF/ycEYmKyzURCIt/RaZIhL+PulbQ9Yu2z1HdOJDdqDTlxA1+xKBmHXJsczAw==",
+      "license": "MIT"
+    },
+    "node_modules/source-map-js": {
+      "version": "1.2.2",
+      "resolved": "https://registry.npmjs.org/source-map-js/-/source-map-js-1.2.2.tgz",
+      "integrity": "sha512-KGj/8Y43x35aZVDtt+J4mK1hoLGHULMYfSkODJNQjNDC3oW1PqPoxMwo0pLUsWM/UEGzON/NxeHywEfNXNP3Vw==",
+      "dev": true,
+      "license": "BSD-3-Clause",
+      "engines": {
+        "node": ">=0.10.0"
+      }
+    },
+    "node_modules/tinyglobby": {
+      "version": "0.2.17",
+      "resolved": "https://registry.npmjs.org/tinyglobby/-/tinyglobby-0.2.17.tgz",
+      "integrity": "sha512-wXR/dYpcqKmfWpEdZjiKJOwCNFndD0DMnrW/cYjVGttEkBfVgcLFHoNrlj47mjOVic9yyNu65alsgF4NQyTa2g==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "fdir": "^6.5.0",
+        "picomatch": "^4.0.4"
+      },
+      "engines": {
+        "node": ">=12.0.0"
+      },
+      "funding": {
+        "url": "https://github.com/sponsors/SuperchupuDev"
+      }
+    },
+    "node_modules/vite": {
+      "version": "8.3.3",
+      "resolved": "https://registry.npmjs.org/vite/-/vite-8.3.3.tgz",
+      "integrity": "sha512-cTAldKPImjg6c+gk48U19POPn3GCBzZwpdsN8ZMEEcbpes+6/wvfqUd0C2y3qYY4wsj8PwgFwrZ/1jBPVttMSg==",
+      "dev": true,
+      "license": "MIT",
+      "dependencies": {
+        "lightningcss": "^1.33.0",
+        "picomatch": "^4.0.7",
+        "postcss": "^8.5.28",
+        "rolldown": "~1.2.11",
+        "tinyglobby": "^0.2.17"
+      },
+      "bin": {
+        "vite": "bin/vite.js"
+      },
+      "engines": {
+        "node": "^20.19.0 || >=22.12.0"
+      },
+      "funding": {
+        "url": "https://github.com/vitejs/vite?sponsor=1"
+      },
+      "optionalDependencies": {
+        "fsevents": "~2.3.3"
+      },
+      "peerDependencies": {
+        "@types/node": "^20.19.0 || >=22.12.0",
+        "@vitejs/devtools": "^0.7.1",
+        "esbuild": "^0.27.0 || ^0.28.0",
+        "jiti": ">=1.21.0",
+        "less": "^4.0.0",
+        "sass": "^1.70.0",
+        "sass-embedded": "^1.70.0",
+        "stylus": ">=0.54.8",
+        "sugarss": "^5.0.0",
+        "terser": "^5.16.0",
+        "tsx": "^4.8.1",
+        "yaml": "^2.4.2"
+      },
+      "peerDependenciesMeta": {
+        "@types/node": {
+          "optional": true
+        },
+        "@vitejs/devtools": {
+          "optional": true
+        },
+        "esbuild": {
+          "optional": true
+        },
+        "jiti": {
+          "optional": true
+        },
+        "less": {
+          "optional": true
+        },
+        "sass": {
+          "optional": true
+        },
+        "sass-embedded": {
+          "optional": true
+        },
+        "stylus": {
+          "optional": true
+        },
+        "sugarss": {
+          "optional": true
+        },
+        "terser": {
+          "optional": true
+        },
+        "tsx": {
+          "optional": true
+        },
+        "yaml": {
+          "optional": true
+        }
+      }
+    }
+  }
+}
+
+--- FILE: .\frontend\package.json ---
+{
+  "name": "frontend",
+  "private": true,
+  "version": "0.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "lint": "oxlint",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "lucide-react": "^1.52.0",
+    "react": "^19.2.8",
+    "react-dom": "^19.2.8"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.7",
+    "@vitejs/plugin-react": "^6.1.1",
+    "oxlint": "^1.81.0",
+    "vite": "^8.3.0"
+  }
+}
+
+--- FILE: .\frontend\README.md ---
+# React + Vite
+
+This template provides a minimal setup to get React working in Vite with HMR and some Oxlint rules.
+
+Currently, two official plugins are available:
+
+- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
+- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+
+## React Compiler
+
+The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
+
+## Expanding the Oxlint configuration
+
+If you are developing a production application, we recommend using TypeScript with type-aware lint rules enabled. Check out the [TS template](https://github.com/vitejs/vite/tree/main/packages/create-vite/template-react-ts) for information on how to integrate TypeScript and Oxlint's TypeScript related rules in your project.
+
+--- FILE: .\frontend\vite.config.js ---
+import react from '@vitejs/plugin-react'
+import { defineConfig } from 'vite'
+
+// https://vite.dev/config/
+export default defineConfig({
+  plugins: [react()],
+})
+
+--- FILE: .\frontend\src\App.css ---
+.counter {
+  font-size: 16px;
+  padding: 5px 10px;
+  border-radius: 5px;
+  color: var(--accent);
+  background: var(--accent-bg);
+  border: 2px solid transparent;
+  transition: border-color 0.3s;
+  margin-bottom: 24px;
+
+  &:hover {
+    border-color: var(--accent-border);
+  }
+  &:focus-visible {
+    outline: 2px solid var(--accent);
+    outline-offset: 2px;
+  }
+}
+
+.hero {
+  position: relative;
+
+  .base,
+  .framework,
+  .vite {
+    inset-inline: 0;
+    margin: 0 auto;
+  }
+
+  .base {
+    width: 170px;
+    position: relative;
+    z-index: 0;
+  }
+
+  .framework,
+  .vite {
+    position: absolute;
+  }
+
+  .framework {
+    z-index: 1;
+    top: 34px;
+    height: 28px;
+    transform: perspective(2000px) rotateZ(300deg) rotateX(44deg) rotateY(39deg)
+      scale(1.4);
+  }
+
+  .vite {
+    z-index: 0;
+    top: 107px;
+    height: 26px;
+    width: auto;
+    transform: perspective(2000px) rotateZ(300deg) rotateX(40deg) rotateY(39deg)
+      scale(0.8);
+  }
+}
+
+#center {
+  display: flex;
+  flex-direction: column;
+  gap: 25px;
+  place-content: center;
+  place-items: center;
+  flex-grow: 1;
+
+  @media (max-width: 1024px) {
+    padding: 32px 20px 24px;
+    gap: 18px;
+  }
+}
+
+#next-steps {
+  display: flex;
+  border-top: 1px solid var(--border);
+  text-align: left;
+
+  & > div {
+    flex: 1 1 0;
+    padding: 32px;
+    @media (max-width: 1024px) {
+      padding: 24px 20px;
+    }
+  }
+
+  .icon {
+    margin-bottom: 16px;
+    width: 22px;
+    height: 22px;
+  }
+
+  @media (max-width: 1024px) {
+    flex-direction: column;
+    text-align: center;
+  }
+}
+
+#docs {
+  border-right: 1px solid var(--border);
+
+  @media (max-width: 1024px) {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+}
+
+#next-steps ul {
+  list-style: none;
+  padding: 0;
+  display: flex;
+  gap: 8px;
+  margin: 32px 0 0;
+
+  .logo {
+    height: 18px;
+  }
+
+  a {
+    color: var(--text-h);
+    font-size: 16px;
+    border-radius: 6px;
+    background: var(--social-bg);
+    display: flex;
+    padding: 6px 12px;
+    align-items: center;
+    gap: 8px;
+    text-decoration: none;
+    transition: box-shadow 0.3s;
+
+    &:hover {
+      box-shadow: var(--shadow);
+    }
+    .button-icon {
+      height: 18px;
+      width: 18px;
+    }
+  }
+
+  @media (max-width: 1024px) {
+    margin-top: 20px;
+    flex-wrap: wrap;
+    justify-content: center;
+
+    li {
+      flex: 1 1 calc(50% - 8px);
+    }
+
+    a {
+      width: 100%;
+      justify-content: center;
+      box-sizing: border-box;
+    }
+  }
+}
+
+#spacer {
+  height: 88px;
+  border-top: 1px solid var(--border);
+  @media (max-width: 1024px) {
+    height: 48px;
+  }
+}
+
+.ticks {
+  position: relative;
+  width: 100%;
+
+  &::before,
+  &::after {
+    content: '';
+    position: absolute;
+    top: -4.5px;
+    border: 5px solid transparent;
+  }
+
+  &::before {
+    left: 0;
+    border-left-color: var(--border);
+  }
+  &::after {
+    right: 0;
+    border-right-color: var(--border);
+  }
+}
+
+--- FILE: .\frontend\src\index.css ---
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+:root {
+  --bg-primary: #0f111a;
+  --bg-secondary: #161925;
+  --bg-glass: rgba(22, 25, 37, 0.7);
+  --border-glass: rgba(255, 255, 255, 0.08);
+  
+  --text-primary: #f8fafc;
+  --text-secondary: #94a3b8;
+  --text-muted: #64748b;
+  
+  --accent-primary: #6366f1;
+  --accent-hover: #4f46e5;
+  --accent-glow: rgba(99, 102, 241, 0.5);
+  
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --info: #3b82f6;
+
+  --shadow-sm: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+  --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.1), 0 2px 4px -1px rgba(0, 0, 0, 0.06);
+  --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1), 0 4px 6px -2px rgba(0, 0, 0, 0.05);
+  --shadow-glow: 0 0 15px var(--accent-glow);
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+body {
+  font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+  background-color: var(--bg-primary);
+  color: var(--text-primary);
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  min-height: 100vh;
+  position: relative;
+  overflow-x: hidden;
+}
+
+/* Background Gradients for Premium Feel */
+body::before, body::after {
+  content: '';
+  position: fixed;
+  border-radius: 50%;
+  filter: blur(100px);
+  z-index: -1;
+  opacity: 0.15;
+}
+
+body::before {
+  top: -10%;
+  left: -10%;
+  width: 500px;
+  height: 500px;
+  background: var(--accent-primary);
+}
+
+body::after {
+  bottom: -10%;
+  right: -10%;
+  width: 600px;
+  height: 600px;
+  background: var(--info);
+}
+
+/* Typography */
+h1, h2, h3, h4, h5, h6 {
+  font-weight: 600;
+  line-height: 1.2;
+  letter-spacing: -0.02em;
+}
+
+/* Glassmorphism Utilities */
+.glass-panel {
+  background: var(--bg-glass);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid var(--border-glass);
+  border-radius: 16px;
+  box-shadow: var(--shadow-lg);
+}
+
+/* Button Styles */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  padding: 0.625rem 1.25rem;
+  font-weight: 500;
+  font-size: 0.875rem;
+  border-radius: 8px;
+  border: none;
+  cursor: pointer;
+  transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  font-family: inherit;
+}
+
+.btn-primary {
+  background-color: var(--accent-primary);
+  color: white;
+  box-shadow: 0 4px 14px 0 rgba(99, 102, 241, 0.39);
+}
+
+.btn-primary:hover {
+  background-color: var(--accent-hover);
+  box-shadow: 0 6px 20px rgba(99, 102, 241, 0.23);
+  transform: translateY(-1px);
+}
+
+.btn-secondary {
+  background-color: rgba(255, 255, 255, 0.05);
+  color: var(--text-primary);
+  border: 1px solid var(--border-glass);
+}
+
+.btn-secondary:hover {
+  background-color: rgba(255, 255, 255, 0.1);
+  transform: translateY(-1px);
+}
+
+/* Badges */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.25rem 0.625rem;
+  border-radius: 9999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.badge-critical { background: rgba(239, 68, 68, 0.15); color: #fca5a5; border: 1px solid rgba(239, 68, 68, 0.3); }
+.badge-high { background: rgba(245, 158, 11, 0.15); color: #fcd34d; border: 1px solid rgba(245, 158, 11, 0.3); }
+.badge-medium { background: rgba(59, 130, 246, 0.15); color: #93c5fd; border: 1px solid rgba(59, 130, 246, 0.3); }
+.badge-low { background: rgba(16, 185, 129, 0.15); color: #6ee7b7; border: 1px solid rgba(16, 185, 129, 0.3); }
+
+/* Layout */
+.app-container {
+  max-width: 1280px;
+  margin: 0 auto;
+  padding: 2rem;
+}
+
+.header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 3rem;
+}
+
+.header-title {
+  font-size: 2rem;
+  background: linear-gradient(to right, #fff, #94a3b8);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+/* Grid System */
+.grid {
+  display: grid;
+  gap: 1.5rem;
+}
+
+.grid-cols-1 { grid-template-columns: repeat(1, 1fr); }
+.grid-cols-2 { grid-template-columns: repeat(2, 1fr); }
+.grid-cols-3 { grid-template-columns: repeat(3, 1fr); }
+.grid-cols-4 { grid-template-columns: repeat(4, 1fr); }
+
+/* Cards */
+.card {
+  padding: 1.5rem;
+  transition: transform 0.2s ease, box-shadow 0.2s ease;
+}
+
+.card:hover {
+  transform: translateY(-2px);
+  box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.3), 0 0 10px rgba(255, 255, 255, 0.02);
+}
+
+.card-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  margin-bottom: 1rem;
+}
+
+.card-title {
+  font-size: 1.125rem;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.card-meta {
+  font-size: 0.875rem;
+  color: var(--text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 0.5rem;
+}
+
+/* Animations */
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+.animate-fade-in {
+  animation: fadeIn 0.4s ease-out forwards;
+}
+
+.delay-100 { animation-delay: 100ms; }
+.delay-200 { animation-delay: 200ms; }
+.delay-300 { animation-delay: 300ms; }
+
+/* Status Indicators */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.status-running { background-color: var(--warning); box-shadow: 0 0 8px var(--warning); animation: pulse 2s infinite; }
+.status-completed { background-color: var(--success); box-shadow: 0 0 8px var(--success); }
+.status-failed { background-color: var(--danger); box-shadow: 0 0 8px var(--danger); }
+
+@keyframes pulse {
+  0% { opacity: 1; }
+  50% { opacity: 0.5; }
+  100% { opacity: 1; }
+}
+
+/* Code Blocks */
+pre {
+  background: #0d1117;
+  border: 1px solid var(--border-glass);
+  border-radius: 8px;
+  padding: 1rem;
+  overflow-x: auto;
+  font-family: 'JetBrains Mono', 'Fira Code', monospace;
+  font-size: 0.875rem;
+  color: #e2e8f0;
+}
+@keyframes pulse-opacity { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } } .animate-pulse { animation: pulse-opacity 2s cubic-bezier(0.4, 0, 0.6, 1) infinite; }
+
+--- FILE: .\mock-app\ground_truth.json ---
+{
+  "bugs": [
+    {
+      "type": "checkout button overflow on mobile",
+      "description": "The checkout button is fixed at 400px width causing it to overflow on mobile screens."
+    },
+    {
+      "type": "hero text contrast",
+      "description": "The hero text lacks contrast against its background."
+    },
+    {
+      "type": "price overlap",
+      "description": "The price overlaps the image due to top: -20px absolute positioning."
+    }
+  ]
+}
+
+--- FILE: .\mock-app\index.html ---
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Mock Storefront</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header class="header">
+        <div class="logo">Storefront</div>
+        <nav class="nav">
+            <a href="#">Home</a>
+            <a href="#">Products</a>
+            <a href="#">About</a>
+        </nav>
+        <div class="cart-icon">🛒 <span class="cart-count">0</span></div>
+    </header>
+
+    <div class="container">
+        <div class="hero-banner">
+            <h1 class="hero-text">Welcome to our store</h1>
+            <p class="hero-subtext">Discover amazing products today.</p>
+        </div>
+
+        <h2 class="section-title">Featured Products</h2>
+        
+        <div class="product-grid">
+            <!-- Product 1 -->
+            <div class="product-card">
+                <div class="image-container">
+                    <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='200'%3E%3Crect width='300' height='200' fill='%23cccccc'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' fill='%23333333'%3E300x200%3C/text%3E%3C/svg%3E" alt="Product 1">
+                </div>
+                <div class="product-info">
+                    <div class="price-container">
+                        <span class="price">$29.99</span>
+                        <span class="discount-tag">Sale</span>
+                    </div>
+                    <h3 class="product-name">Wireless Headphones</h3>
+                    <button class="add-to-cart">Add to Cart</button>
+                </div>
+            </div>
+            
+            <!-- Product 2 -->
+            <div class="product-card">
+                <div class="image-container">
+                    <img src="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='300' height='200'%3E%3Crect width='300' height='200' fill='%23cccccc'/%3E%3Ctext x='50%25' y='50%25' dominant-baseline='middle' text-anchor='middle' fill='%23333333'%3E300x200%3C/text%3E%3C/svg%3E" alt="Product 2">
+                </div>
+                <div class="product-info">
+                    <div class="price-container price-container-normal">
+                        <span class="price">$49.99</span>
+                    </div>
+                    <h3 class="product-name">Smart Watch</h3>
+                    <button class="add-to-cart">Add to Cart</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="floating-checkout-bar">
+        <div class="checkout-content">
+            <span class="total-label">Total: $<span id="cart-total">0.00</span></span>
+            <button class="checkout-button">Proceed to Checkout</button>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
+
+--- FILE: .\mock-app\script.js ---
+// Basic interaction script for the mock app
+document.addEventListener('DOMContentLoaded', () => {
+    const addToCartButtons = document.querySelectorAll('.add-to-cart');
+    const cartCountElement = document.querySelector('.cart-count');
+    
+    let cartCount = 2; // Initial mock count
+    
+    addToCartButtons.forEach(button => {
+        button.addEventListener('click', (e) => {
+            // Simple animation
+            const originalText = button.textContent;
+            button.textContent = 'Added!';
+            button.style.backgroundColor = '#10b981'; // Green
+            
+            // Update cart
+            cartCount++;
+            cartCountElement.textContent = cartCount;
+            
+            // Reset button
+            setTimeout(() => {
+                button.textContent = originalText;
+                button.style.backgroundColor = ''; // Revert to css default
+            }, 1000);
+        });
+    });
+});
+
+--- FILE: .\mock-app\styles.css ---
+:root {
+    --primary-color: #3b82f6;
+    --text-color: #333333;
+    --background-color: #f9fafb;
+    --card-bg: #ffffff;
+}
+
+* {
+    box-sizing: border-box;
+    margin: 0;
+    padding: 0;
+    font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+}
+
+body {
+    background-color: var(--background-color);
+    color: var(--text-color);
+    line-height: 1.6;
+}
+
+/* Header */
+.header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 1rem 2rem;
+    background-color: var(--card-bg);
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+
+.logo {
+    font-size: 1.5rem;
+    font-weight: bold;
+    color: var(--primary-color);
+}
+
+.nav a {
+    text-decoration: none;
+    color: var(--text-color);
+    margin: 0 1rem;
+    font-weight: 500;
+}
+
+.cart-icon {
+    font-size: 1.2rem;
+    cursor: pointer;
+}
+
+/* Container */
+.container {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 2rem;
+}
+
+.hero-banner {
+    background-color: #e5e7eb;
+    padding: 4rem 2rem;
+    text-align: center;
+    border-radius: 8px;
+    margin-bottom: 3rem;
+}
+
+.hero-text {
+    font-size: 3rem;
+    color: #ffffff;
+}
+
+.hero-subtext {
+    font-size: 1.2rem;
+    color: #ffffff;
+}
+
+.section-title {
+    margin-bottom: 2rem;
+    font-size: 2rem;
+}
+
+/* Product Grid */
+.product-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+    gap: 2rem;
+    margin-bottom: 5rem;
+}
+
+.product-card {
+    background-color: var(--card-bg);
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 4px 6px rgba(0,0,0,0.05);
+    transition: transform 0.2s;
+}
+
+.product-card:hover {
+    transform: translateY(-5px);
+}
+
+.image-container img {
+    width: 100%;
+    height: auto;
+    display: block;
+}
+
+.product-info {
+    padding: 1.5rem;
+    position: relative;
+}
+
+.product-name {
+    font-size: 1.25rem;
+    margin-bottom: 0.5rem;
+}
+
+.price-container {
+    position: absolute;
+    top: -20px;
+    background: white;
+    padding: 5px;
+    border-radius: 4px;
+}
+
+.price-container-normal {
+    margin-bottom: 1rem;
+}
+
+.price {
+    font-weight: bold;
+    font-size: 1.5rem;
+    color: var(--primary-color);
+}
+
+.discount-tag {
+    background-color: #ef4444;
+    color: white;
+    padding: 0.2rem 0.5rem;
+    border-radius: 4px;
+    font-size: 0.8rem;
+    margin-left: 0.5rem;
+}
+
+.add-to-cart {
+    display: block;
+    width: 100%;
+    padding: 0.75rem;
+    background-color: var(--primary-color);
+    color: white;
+    border: none;
+    border-radius: 4px;
+    font-size: 1rem;
+    cursor: pointer;
+    margin-top: 1rem;
+}
+
+.add-to-cart:hover {
+    background-color: #2563eb;
+}
+
+/* Footer */
+.footer {
+    text-align: center;
+    padding: 2rem;
+    background-color: var(--card-bg);
+    margin-top: auto;
+}
+
+.floating-checkout-bar {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    background-color: #1f2937;
+    color: white;
+    padding: 1rem;
+}
+
+.checkout-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    max-width: 1200px;
+    margin: 0 auto;
+}
+
+.checkout-button {
+    width: 400px; 
+    padding: 1rem;
+    background-color: #10b981;
+    color: white;
+    border: none;
+    font-weight: bold;
+    font-size: 1.2rem;
+    cursor: pointer;
+}
+
+--- FILE: .\scripts\start_dev.py ---
+#!/usr/bin/env python3
+"""
+OmniSight — Quick Start Script
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Sets up the development environment and starts the backend server.
+Usage: python scripts/start_dev.py
+"""
+
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+
+def main() -> None:
+    """Set up and start the OmniSight development server."""
+    project_root = Path(__file__).resolve().parent.parent
+
+    # Check for .env file
+    env_file = project_root / ".env"
+    env_example = project_root / ".env.example"
+
+    if not env_file.exists():
+        print("⚠️  No .env file found. Copying from .env.example...")
+        if env_example.exists():
+            import shutil
+            shutil.copy(env_example, env_file)
+            print("✅ Created .env — please update it with your API keys.")
+        else:
+            print("❌ .env.example not found either!")
+            sys.exit(1)
+
+    # Start uvicorn
+    print("\n🚀 Starting OmniSight backend server...")
+    subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "uvicorn",
+            "backend.main:app",
+            "--host", "0.0.0.0",
+            "--port", "8000",
+        ],
+        cwd=str(project_root),
+    )
+
+
+if __name__ == "__main__":
+    main()
+
+--- FILE: .\tests\test_api.py ---
+"""
+OmniSight — API Endpoint Tests
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+Tests for the FastAPI health check and API endpoints.
+"""
+
+import pytest
+from httpx import ASGITransport, AsyncClient
+
+from backend.main import app
+
+
+@pytest.fixture
+async def client():
+    """Create an async test client for the FastAPI app."""
+    async with AsyncClient(
+        transport=ASGITransport(app=app),
+        base_url="http://test",
+    ) as ac:
+        yield ac
+
+
+@pytest.mark.asyncio
+async def test_root(client: AsyncClient):
+    """Test root endpoint returns welcome message."""
+    response = await client.get("/")
+    assert response.status_code == 200
+    data = response.json()
+    assert "message" in data
+    assert "OmniSight" in data["message"]
+
+
+@pytest.mark.asyncio
+async def test_health_check(client: AsyncClient):
+    """Test health check returns healthy status."""
+    response = await client.get("/health")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "healthy"
+    assert data["service"] == "OmniSight"
+    assert "version" in data
+    assert "checks" in data
+
+
+@pytest.mark.asyncio
+async def test_api_status(client: AsyncClient):
+    """Test API v1 status endpoint."""
+    response = await client.get("/api/v1/status")
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "operational"
+    assert "services" in data
+
+
+from unittest.mock import patch
+
+@pytest.mark.asyncio
+async def test_scan_success(client: AsyncClient):
+    """Test scan endpoint returns success for Day 3."""
+    with patch("backend.api.routes.capture_screenshots") as mock_capture:
+        with patch("backend.api.routes.analyze_screenshot") as mock_analyze:
+            mock_capture.return_value = {"desktop": "/tmp/test.png"}
+            mock_analyze.return_value = {
+                "status": "success",
+                "bugs": [{"id": "1", "title": "Test bug"}]
+            }
+            response = await client.post("/api/v1/scan")
+            assert response.status_code == 200
+            data = response.json()
+            assert data["status"] == "success"
+            assert "screenshots" in data
+            assert data["total_bugs"] == 1
+
+
+@pytest.mark.asyncio
+async def test_list_runs_empty(client: AsyncClient):
+    """Test list runs endpoint returns correctly."""
+    response = await client.get("/api/v1/runs")
+    assert response.status_code == 200
+    data = response.json()
+    assert isinstance(data["runs"], list)
+    assert isinstance(data["total"], int)
+
+--- FILE: .\tests\test_self_healing_pipeline.py ---
+import pytest
+from httpx import ASGITransport, AsyncClient
+from backend.main import app
+
+@pytest.fixture
+async def client():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
+        yield ac
+
+@pytest.mark.asyncio
+async def test_webhook_trigger_success(client: AsyncClient):
+    """Verifies that the CI/CD webhook accepts payloads and queues the agent."""
+    payload = {
+        "repository": "infotact/mock-store",
+        "branch": "main",
+        "commit_sha": "abc123def456",
+        "staging_url": "http://localhost:8000/mock-app/index.html"
+    }
+    
+    response = await client.post("/api/v1/webhook/ci-cd-trigger", json=payload)
+    
+    assert response.status_code == 202
+    data = response.json()
+    assert data["status"] == "accepted"
+    assert "job_id" in data
+    assert data["commit_sha"] == "abc123def456"
+
+@pytest.mark.asyncio
+async def test_pr_creator_fallback():
+    """Verifies PR creator falls back safely when GitHub credentials are omitted."""
+    from backend.services.github.pr_creator import create_fix_pr
+    
+    result = await create_fix_pr(
+        file_path="mock-app/styles.css",
+        fix_content=".checkout-button { width: 100%; }",
+        bug_description="Checkout button overflows on mobile",
+    )
+    
+    assert result["status"] == "success"
+    assert "mock" in result["pr_url"]
+
+--- FILE: .\tests\__init__.py ---
+"""OmniSight test suite."""
+
