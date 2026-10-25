@@ -65,7 +65,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         async with engine.begin() as conn:
             await conn.execute(
-                text("UPDATE scan_runs SET status = 'failed' WHERE status IN ('running', 'pending')")
+                text("UPDATE scan_runs SET status = 'failed' WHERE UPPER(status) IN ('RUNNING', 'PENDING')")
             )
         logger.info("🧹 Cleaned up orphaned scan runs on startup")
     except Exception as e:

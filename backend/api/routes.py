@@ -28,14 +28,15 @@ router = APIRouter(prefix="/api/v1", tags=["omnisight"])
 @router.get("/status", summary="System status")
 async def system_status() -> dict[str, Any]:
     """Return current system status and capabilities."""
+    settings = get_settings()
     return {
         "status": "operational",
         "version": "0.1.0",
         "services": {
             "browser_automation": "ready",
-            "vlm_analysis": "not_configured",
-            "github_integration": "not_configured",
-            "agent_orchestrator": "not_configured",
+            "vlm_analysis": "ready" if bool(settings.gemini_api_key) else "not_configured",
+            "github_integration": "ready" if bool(settings.github_token) else "not_configured",
+            "agent_orchestrator": "ready" if bool(settings.gemini_api_key and settings.github_token) else "not_configured",
         },
     }
 

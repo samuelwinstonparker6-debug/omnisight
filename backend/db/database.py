@@ -17,11 +17,16 @@ logger = logging.getLogger(__name__)
 
 settings = get_settings()
 
+connect_args = {}
+if "sqlite" in settings.database_url:
+    connect_args = {"check_same_thread": False, "timeout": 30.0}
+
 # ── Async Engine ─────────────────────────────────────────────
 engine = create_async_engine(
     settings.database_url,
     echo=settings.app_debug,
     future=True,
+    connect_args=connect_args,
 )
 
 # ── Session Factory ──────────────────────────────────────────
